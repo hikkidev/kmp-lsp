@@ -56,6 +56,10 @@ impl Backend {
         let handle =
             crate::indexer::enrich::spawn_enrichment_worker(Arc::clone(&indexer), client.clone());
         indexer.set_enrichment_handle(handle);
+        let binding_handle = crate::indexer::spawn_binding_discovery_worker(Arc::clone(
+            &indexer,
+        ));
+        indexer.set_binding_discovery_handle(binding_handle);
 
         Self {
             client,
@@ -236,6 +240,31 @@ impl LanguageServer for Backend {
                         }
                     }
                 });
+                continue;
+            }
+
+            if crate::indexer::is_generated_binding_watcher_path(&path) {
+                if change.typ == FileChangeType::DELETED {
+                    if let Some(module_root) =
+                        crate::indexer::module_root_for_generated_file(&path)
+                    {
+                        let indexer = Arc::clone(&self.indexer);
+                        tokio::task::spawn(async move {
+                            tokio::task::spawn_blocking(move || {
+                                indexer.index_generated_bindings(&module_root);
+                            })
+                            .await
+                            .ok();
+                        });
+                    }
+                    continue;
+                }
+                if let Some(module_root) =
+                    crate::indexer::module_root_for_generated_file(&path)
+                {
+                    self.indexer
+                        .request_generated_binding_discovery(module_root);
+                }
                 continue;
             }
 

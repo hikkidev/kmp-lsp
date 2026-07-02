@@ -260,6 +260,7 @@ fn aborted_scan_result(root: &Path) -> WorkspaceIndexResult {
         aborted: true,
         complete_scan: false,
         cached_layouts: std::collections::HashMap::new(),
+        cached_generated_bindings: std::collections::HashMap::new(),
     }
 }
 
@@ -566,6 +567,7 @@ fn build_workspace_result(
         aborted: false,
         complete_scan: !discovered.truncated,
         cached_layouts: std::collections::HashMap::new(),
+        cached_generated_bindings: std::collections::HashMap::new(),
     }
 }
 
@@ -942,6 +944,16 @@ impl Indexer {
             })
             .await
             .ok();
+            let cached_generated_bindings = result.cached_generated_bindings.clone();
+            let indexer_for_bindings = Arc::clone(&self);
+            tokio::task::spawn_blocking(move || {
+                if !cached_generated_bindings.is_empty() {
+                    indexer_for_bindings
+                        .restore_generated_bindings_from_cache(&cached_generated_bindings);
+                }
+            })
+            .await
+            .ok();
             // Always save when a complete scan ran — this trims deleted-file entries from
             // the on-disk cache even when files_parsed == 0 (all cache hits).  Skip only
             // for partial / truncated scans where nothing new was parsed.
@@ -1054,6 +1066,7 @@ impl Indexer {
         );
         if let Some(ref disk_cache) = cache {
             result.cached_layouts = disk_cache.layouts.clone();
+            result.cached_generated_bindings = disk_cache.generated_bindings.clone();
         }
         write_indexing_done_status(
             root,
@@ -1081,6 +1094,7 @@ impl Indexer {
             &self.content_hashes,
             &self.library_uris,
             &self.layouts,
+            &self.generated_bindings,
             complete_scan,
             allow_shrink,
         );

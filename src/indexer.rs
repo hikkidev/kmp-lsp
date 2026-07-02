@@ -67,6 +67,13 @@ mod discover;
 mod layout;
 pub(crate) use self::layout::{is_layout_xml_path, LayoutCacheEntry, LayoutFileData};
 
+mod binding_discovery;
+pub(crate) use self::binding_discovery::{
+    is_generated_binding_watcher_path, module_root_for_generated_file,
+    spawn_binding_discovery_worker, BindingDiscoveryHandle, ModuleBindings,
+    ModuleBindingsCacheEntry,
+};
+
 mod scan;
 pub(crate) const MAX_FILES_UNLIMITED: usize = usize::MAX;
 
@@ -304,6 +311,10 @@ pub(crate) struct Indexer {
     pub(crate) jar_symbol_packages: DashMap<String, Vec<String>>,
     /// URI string → parsed Android layout XML metadata (ViewBinding side index).
     pub(crate) layouts: DashMap<String, Arc<LayoutFileData>>,
+    /// Module root → discovered generated ViewBinding Java files.
+    pub(crate) generated_bindings: DashMap<PathBuf, Arc<ModuleBindings>>,
+    /// Handle for enqueueing background generated-binding discovery.
+    pub(crate) binding_discovery: std::sync::RwLock<BindingDiscoveryHandle>,
 }
 
 /// Cap on how many same-named definitions a receiver-less by-name inference lookup
@@ -566,6 +577,8 @@ impl Indexer {
             jar_symbol_packages: DashMap::new(),
             extension_by_receiver: DashMap::new(),
             layouts: DashMap::new(),
+            generated_bindings: DashMap::new(),
+            binding_discovery: std::sync::RwLock::new(BindingDiscoveryHandle::noop()),
         }
     }
 
@@ -684,6 +697,10 @@ impl Indexer {
         self.sig_cache.clear();
         self.sig_fast_cache.clear();
         self.layouts.clear();
+        self.generated_bindings.clear();
+        if let Ok(handle) = self.binding_discovery.read() {
+            handle.clear();
+        }
         // Clear enrichment dedup so symbols are re-attempted after reindex.
         if let Ok(handle) = self.enrichment.read() {
             handle.clear();

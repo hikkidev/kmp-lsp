@@ -193,6 +193,7 @@ fn apply_workspace_result_includes_cached_files_issue_apply() {
         aborted: false,
         complete_scan: true,
         cached_layouts: std::collections::HashMap::new(),
+        cached_generated_bindings: std::collections::HashMap::new(),
     };
 
     let idx = Indexer::new();
@@ -223,6 +224,7 @@ fn apply_workspace_result_clears_stale_workspace_issue_apply() {
         aborted: false,
         complete_scan: true,
         cached_layouts: std::collections::HashMap::new(),
+        cached_generated_bindings: std::collections::HashMap::new(),
     });
     assert!(
         idx.definitions.contains_key("ClassA"),
@@ -238,6 +240,7 @@ fn apply_workspace_result_clears_stale_workspace_issue_apply() {
         aborted: false,
         complete_scan: true,
         cached_layouts: std::collections::HashMap::new(),
+        cached_generated_bindings: std::collections::HashMap::new(),
     });
 
     assert!(
@@ -279,6 +282,7 @@ fn apply_workspace_result_mixed_cache_and_parsed_issue_apply() {
         aborted: false,
         complete_scan: true,
         cached_layouts: std::collections::HashMap::new(),
+        cached_generated_bindings: std::collections::HashMap::new(),
     });
 
     assert!(

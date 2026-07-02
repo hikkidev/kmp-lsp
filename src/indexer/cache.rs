@@ -19,6 +19,7 @@ use tower_lsp::lsp_types::Url;
 use crate::types::{FileData, FileIndexResult, Visibility};
 
 use super::layout::LayoutFileData;
+use super::binding_discovery::{ModuleBindings, ModuleBindingsCacheEntry};
 
 pub(crate) use super::layout::LayoutCacheEntry;
 
@@ -29,7 +30,8 @@ pub(crate) use super::layout::LayoutCacheEntry;
 /// v29: recover interface symbols mis-parsed via qualified/array annotations
 ///      (forces reparse so the recovered symbols populate).
 /// v30: persist Android layout side index entries.
-pub(crate) const CACHE_VERSION: u32 = 30;
+/// v31: persist generated ViewBinding side index entries.
+pub(crate) const CACHE_VERSION: u32 = 31;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +76,9 @@ pub(super) struct IndexCache {
     /// Absolute path string → cached layout side-index data.
     #[serde(default)]
     pub(super) layouts: HashMap<String, LayoutCacheEntry>,
+    /// Module root path string → cached generated binding side-index data.
+    #[serde(default)]
+    pub(super) generated_bindings: HashMap<String, ModuleBindingsCacheEntry>,
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -211,12 +216,14 @@ pub(crate) fn build_qualified_keys(
 /// Does **not** overwrite a larger complete cache with a smaller incomplete one,
 /// to prevent an editor server (which may load only part of the workspace) from
 /// truncating a cache built by `--index-only`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn save_cache(
     root: &Path,
     files: &DashMap<String, Arc<FileData>>,
     content_hashes: &DashMap<String, u64>,
     library_uris: &DashSet<String>,
     layouts: &DashMap<String, Arc<LayoutFileData>>,
+    generated_bindings: &DashMap<PathBuf, Arc<ModuleBindings>>,
     complete_scan: bool,
     allow_shrink: bool,
 ) {
@@ -291,11 +298,24 @@ pub(super) fn save_cache(
         }
     }
 
+    let mut generated_binding_entries: HashMap<String, ModuleBindingsCacheEntry> =
+        HashMap::new();
+    for module_ref in generated_bindings.iter() {
+        let module_root = module_ref.key();
+        generated_binding_entries.insert(
+            module_root.to_string_lossy().to_string(),
+            ModuleBindingsCacheEntry {
+                entries: module_ref.value().entries.clone(),
+            },
+        );
+    }
+
     let cache = IndexCache {
         version: CACHE_VERSION,
         complete_scan,
         entries,
         layouts: layout_entries,
+        generated_bindings: generated_binding_entries,
     };
     match bincode::serialize(&cache) {
         Ok(bytes) => {
@@ -658,6 +678,7 @@ fn write_library_chunks(dir: &Path, entries: Vec<(String, FileCacheEntry)>) -> O
             complete_scan: true,
             entries: chunk_entries,
             layouts: HashMap::new(),
+            generated_bindings: HashMap::new(),
         };
         match bincode::serialize(&cache) {
             Ok(bytes) => {

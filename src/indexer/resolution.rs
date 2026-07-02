@@ -124,6 +124,22 @@ pub(crate) trait IndexRead {
     /// Callers that need on-demand indexing must call `ensure_indexed_on_demand()`
     /// before `get_file_data()` (as `build_type_param_subst_impl` does).
     fn ensure_indexed_on_demand(&self, _uri: &str) {}
+
+    /// Layout variants for a generated binding class in the given module (default first).
+    #[allow(dead_code)] // PR 4 navigation
+    fn layouts_for_binding_class(
+        &self,
+        _class_name: &str,
+        _module_root: &std::path::Path,
+    ) -> Vec<Arc<crate::indexer::LayoutFileData>> {
+        Vec::new()
+    }
+
+    /// True when `uri` is a discovered generated ViewBinding Java file.
+    #[allow(dead_code)] // PR 4 remap predicate
+    fn is_generated_binding_uri(&self, _uri: &str) -> bool {
+        false
+    }
 }
 
 /// Read-only workspace surface extending [`IndexRead`].
@@ -731,8 +747,20 @@ impl IndexRead for super::Indexer {
     fn jar_phase(&self) -> crate::indexer::jar_phase::JarPhase {
         self.jar_phase
             .lock()
-            .map(|g| g.clone())
+            .map(|guard| guard.clone())
             .unwrap_or(crate::indexer::jar_phase::JarPhase::Unavailable)
+    }
+
+    fn layouts_for_binding_class(
+        &self,
+        class_name: &str,
+        module_root: &std::path::Path,
+    ) -> Vec<Arc<crate::indexer::LayoutFileData>> {
+        super::Indexer::layouts_for_binding_class(self, class_name, module_root)
+    }
+
+    fn is_generated_binding_uri(&self, uri: &str) -> bool {
+        super::Indexer::is_generated_binding_uri(self, uri)
     }
 }
 
@@ -771,6 +799,22 @@ impl IndexRead for Arc<super::Indexer> {
 
     fn jar_phase(&self) -> crate::indexer::jar_phase::JarPhase {
         <super::Indexer as IndexRead>::jar_phase(self.as_ref())
+    }
+
+    fn layouts_for_binding_class(
+        &self,
+        class_name: &str,
+        module_root: &std::path::Path,
+    ) -> Vec<Arc<crate::indexer::LayoutFileData>> {
+        <super::Indexer as IndexRead>::layouts_for_binding_class(
+            self.as_ref(),
+            class_name,
+            module_root,
+        )
+    }
+
+    fn is_generated_binding_uri(&self, uri: &str) -> bool {
+        <super::Indexer as IndexRead>::is_generated_binding_uri(self.as_ref(), uri)
     }
 }
 

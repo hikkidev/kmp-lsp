@@ -126,6 +126,7 @@ fn warm_discover_files_returns_cached_existing_files() {
         complete_scan: true,
         entries,
         layouts: HashMap::new(),
+        generated_bindings: HashMap::new(),
     };
 
     with_xdg_cache(tmp.path(), || {
@@ -175,6 +176,7 @@ fn warm_discover_files_skips_deleted_files() {
         complete_scan: true,
         entries,
         layouts: HashMap::new(),
+        generated_bindings: HashMap::new(),
     };
 
     with_xdg_cache(tmp.path(), || {

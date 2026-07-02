@@ -374,6 +374,7 @@ impl crate::indexer::Indexer {
         };
         self.layouts
             .insert(uri.to_string(), std::sync::Arc::new(data));
+        self.request_generated_binding_discovery(components.module_root);
     }
 }
 

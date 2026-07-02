@@ -610,6 +610,10 @@ impl Indexer {
         let (hash_key, hash_val) = contrib.content_hash;
         let file_data = self.with_classified_source_set(&uri_str, file_data);
 
+        if let Ok(uri) = Url::parse(&uri_str) {
+            self.maybe_enqueue_binding_discovery_for_file(&uri, &file_data.imports);
+        }
+
         self.content_hashes.insert(hash_key, hash_val);
         self.files.insert(uri_str.clone(), file_data);
 
@@ -1065,6 +1069,7 @@ impl Indexer {
 
         let result = Self::parse_file(uri, content);
         self.apply_file_result(&result);
+        self.maybe_enqueue_binding_discovery_for_file(uri, &result.data.imports);
         // Mark bare names dirty instead of rebuilding — rebuild happens lazily on next read.
         self.bare_names_dirty.store(true, Ordering::Release);
 

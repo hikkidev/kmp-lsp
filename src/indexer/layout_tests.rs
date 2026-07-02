@@ -168,6 +168,7 @@ fn layout_cache_roundtrip() {
             &indexer.content_hashes,
             &indexer.library_uris,
             &indexer.layouts,
+            &indexer.generated_bindings,
             true,
             true,
         );
