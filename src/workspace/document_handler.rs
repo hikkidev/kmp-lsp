@@ -128,6 +128,7 @@ impl DocumentHandler {
 
     pub(crate) async fn handle_file_deleted(&self, uri: Url) {
         self.indexer.remove_indexed_file(&uri);
+        self.indexer.remove_layout(&uri);
         self.indexer.remove_live_tree(&uri);
         self.indexer.remove_live_lines(&uri);
         if let Some(client) = &self.client {

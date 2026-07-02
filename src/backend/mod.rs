@@ -209,10 +209,36 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        // Re-index any *.kt / *.java file that changed on disk.
-        // This fires after workspace/rename edits are applied to closed files,
-        // keeping the in-memory symbol index consistent.
+        // Re-index changed files on disk. Layout XML uses a dedicated side index;
+        // Kotlin/Java/Swift use the symbol index.
         for change in params.changes {
+            let Ok(path) = change.uri.to_file_path() else {
+                continue;
+            };
+
+            if crate::indexer::is_layout_xml_path(&path) {
+                if change.typ == FileChangeType::DELETED {
+                    self.indexer.remove_layout(&change.uri);
+                    continue;
+                }
+                let uri = change.uri;
+                let indexer = Arc::clone(&self.indexer);
+                let semaphore = indexer.parse_sem();
+                tokio::task::spawn(async move {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                        if let Ok(permit) = semaphore.acquire_owned().await {
+                            tokio::task::spawn_blocking(move || {
+                                let _permit = permit;
+                                indexer.index_layout_content(&uri, &content);
+                            })
+                            .await
+                            .ok();
+                        }
+                    }
+                });
+                continue;
+            }
+
             if change.typ == FileChangeType::DELETED {
                 // Remove from index; definition map cleanup is handled lazily.
                 if self
