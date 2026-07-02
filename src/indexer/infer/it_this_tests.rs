@@ -1107,6 +1107,7 @@ fn resolve_member_type_on_fallback_when_class_params_unindexed() {
         "ResultState.Success<Optional<FamilyAccount>>",
         "value",
         &deps,
+        &test_uri(),
     );
     assert_eq!(
         result.as_deref(),
@@ -1126,7 +1127,7 @@ fn resolve_member_type_on_fallback_method_return_unindexed() {
     );
     // NO .with_class_params("Optional", ...)
 
-    let result = resolve_member_type_on("Optional<FamilyAccount>", "getOrNull", &deps);
+    let result = resolve_member_type_on("Optional<FamilyAccount>", "getOrNull", &deps, &test_uri());
     assert_eq!(
         result.as_deref(),
         Some("FamilyAccount"),
@@ -1684,6 +1685,92 @@ fn find_this_context_apply_resolved_with_live_tree() {
     assert!(
         matches!(result, super::ThisContext::Resolved(ref t) if t == "User"),
         "cursor inside user.apply{{}} should be Resolved(User), got: {result:?}"
+    );
+}
+
+#[test]
+fn find_this_context_with_dotted_receiver_resolved() {
+    let src = [
+        "class ViewHolder(val binding: FooBarBinding)",
+        "fun bar(holder: ViewHolder) {",
+        "    with(holder.binding) {",
+        "        this",
+        "    }",
+        "}",
+    ]
+    .join("\n");
+    let (u, idx, lines) = indexed_with_live("/t.kt", &src, &src);
+    let pos = crate::types::CursorPos {
+        line: 3,
+        utf16_col: 12,
+    };
+    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
+    assert!(
+        matches!(result, super::ThisContext::Resolved(ref type_name) if type_name == "FooBarBinding"),
+        "cursor inside with(holder.binding){{}} should be Resolved(FooBarBinding), got: {result:?}"
+    );
+}
+
+#[test]
+fn find_this_context_chained_apply_resolved_with_competing_view_holder() {
+    let wrong_uri = uri("/wrong.kt");
+    let main_uri = uri("/main.kt");
+    let idx = Indexer::new();
+    let wrong_source = "class ViewHolder(val binding: ProfileBinding)";
+    let main_source = [
+        "class ViewHolder(val binding: FooBarBinding)",
+        "fun bar(holder: ViewHolder) {",
+        "    holder.binding.apply {",
+        "        this",
+        "    }",
+        "}",
+    ]
+    .join("\n");
+    idx.index_content(&wrong_uri, wrong_source);
+    idx.index_content(&main_uri, &main_source);
+    idx.store_live_tree(&main_uri, &main_source);
+    idx.set_live_lines(&main_uri, &main_source);
+    let lines: Vec<String> = main_source.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos {
+        line: 3,
+        utf16_col: 12,
+    };
+    let result = super::find_this_context_in_lines(&lines, pos, &idx, &main_uri);
+    assert!(
+        matches!(result, super::ThisContext::Resolved(ref type_name) if type_name == "FooBarBinding"),
+        "holder.binding.apply{{}} must resolve this to FooBarBinding, not ProfileBinding from competing ViewHolder, got: {result:?}"
+    );
+}
+
+#[test]
+fn find_it_element_type_chained_receiver_also_with_competing_view_holder() {
+    let wrong_uri = uri("/wrong.kt");
+    let main_uri = uri("/main.kt");
+    let idx = Indexer::new();
+    let wrong_source = "class ViewHolder(val binding: ProfileBinding)";
+    let main_source = [
+        "class ViewHolder(val binding: FooBarBinding)",
+        "fun bar(holder: ViewHolder) {",
+        "    holder.binding.also {",
+        "        it",
+        "    }",
+        "}",
+    ]
+    .join("\n");
+    idx.index_content(&wrong_uri, wrong_source);
+    idx.index_content(&main_uri, &main_source);
+    idx.store_live_tree(&main_uri, &main_source);
+    idx.set_live_lines(&main_uri, &main_source);
+    let lines: Vec<String> = main_source.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos {
+        line: 3,
+        utf16_col: 12,
+    };
+    let result = super::find_it_element_type_in_lines(&lines, pos, &idx, &main_uri);
+    assert_eq!(
+        result.as_deref(),
+        Some("FooBarBinding"),
+        "it inside holder.binding.also{{}} must resolve to FooBarBinding, got: {result:?}"
     );
 }
 

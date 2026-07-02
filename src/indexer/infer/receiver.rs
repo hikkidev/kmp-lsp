@@ -150,7 +150,7 @@ fn nested_receiver_lambda_type(
     if outer_base.is_empty() {
         return None;
     }
-    let field_raw = deps.find_field_type(outer_base, field)?;
+    let field_raw = deps.find_field_type_from(outer_base, field, uri)?;
     inferred_receiver_lambda_type(&field_raw, method, deps, uri)
 }
 
@@ -239,7 +239,7 @@ fn chain_with_type_subst(
 /// - `"resultWrapped"` → `"Result<FamilyAccount>"`
 /// - `"resultState.value"` where `resultState: ResultState<Account>`,
 ///   `value: Result<T>` → `"Result<Account>"` (T substituted via `ResultState`'s params)
-fn resolve_expr_type_raw(
+pub(crate) fn resolve_expr_type_raw(
     expr: &str,
     deps: &impl InferDeps,
     uri: &Url,
@@ -257,7 +257,7 @@ fn resolve_expr_type_raw(
     let outer_type = variable_type_lookup(deps, outer_var, uri, position)?;
     let outer_dotted = outer_type.dotted_ident_prefix();
     let outer_base = outer_dotted.last_segment();
-    let raw_field = deps.find_field_type(outer_base, &field)?;
+    let raw_field = deps.find_field_type_from(outer_base, &field, uri)?;
     let subst = build_type_arg_subst(deps, outer_base, &outer_type);
     Some(crate::indexer::apply_type_subst(&raw_field, &subst))
 }
@@ -360,8 +360,12 @@ fn with_receiver_lambda_type(
         return None;
     }
     let recv_name = extract_first_arg(before_brace)?;
-    deps.find_var_type(recv_name, uri)
+    resolve_expr_type_raw(recv_name, deps, uri, None)
         .and_then(|raw| uppercase_dotted_type_prefix(&raw))
+        .or_else(|| {
+            deps.find_var_type(recv_name, uri)
+                .and_then(|raw| uppercase_dotted_type_prefix(&raw))
+        })
         .or_else(|| uppercase_ident_prefix(recv_name))
 }
 

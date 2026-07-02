@@ -214,7 +214,7 @@ pub(crate) fn infer_field_chain_type(
             .next()
             .unwrap_or(&current)
             .trim_end_matches('?');
-        let field_raw = find_field_type_in_class(indexer, class_base, field)?;
+        let field_raw = find_field_type_in_class_from(indexer, class_base, field, uri)?;
         current = field_raw.clone();
         leaf_raw = field_raw;
     }
@@ -559,6 +559,25 @@ pub(crate) fn find_field_type_in_class(
                 infer_variable_type_raw(indexer, field_name, &loc.uri)
             })
         })
+}
+
+/// Like [`find_field_type_in_class`] but prefers class definitions reachable from
+/// `from_uri` before scanning the whole workspace.
+pub(crate) fn find_field_type_in_class_from(
+    indexer: &Indexer,
+    class_name: &str,
+    field_name: &str,
+    from_uri: &Url,
+) -> Option<String> {
+    for location in indexer.resolve_symbol_no_rg(class_name, from_uri) {
+        if let Some(field_type) = infer_field_type_raw(indexer, location.uri.as_str(), field_name) {
+            return Some(field_type);
+        }
+        if let Some(field_type) = infer_variable_type_raw(indexer, field_name, &location.uri) {
+            return Some(field_type);
+        }
+    }
+    find_field_type_in_class(indexer, class_name, field_name)
 }
 
 // ─── Extension property type inference ───────────────────────────────────────

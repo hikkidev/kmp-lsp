@@ -90,6 +90,17 @@ pub(crate) trait InferDeps {
         None
     }
 
+    /// Like [`find_field_type`] but prefers class definitions reachable from `uri`
+    /// (imports, same package) before a workspace-wide scan.
+    fn find_field_type_from(
+        &self,
+        class_name: &str,
+        field_name: &str,
+        _uri: &Url,
+    ) -> Option<String> {
+        self.find_field_type(class_name, field_name)
+    }
+
     /// Return the declared type parameter names for a class (e.g. `["T"]` for
     /// `class Result<T>`, `["K", "V"]` for `class Map<K, V>`).
     ///

@@ -11,7 +11,9 @@ use super::super::last_ident_in;
 #[cfg(test)]
 use super::args::has_named_params_not_it;
 use super::args::{extract_first_arg, find_named_param_type_in_sig};
-use super::chain::{cst_forward_resolve_receiver_type, resolve_callee_chain};
+use super::chain::{
+    cst_forward_resolve_receiver_type, resolve_callee_chain, resolve_root_node_type,
+};
 use super::deps::{CallableInfo, InferDeps};
 use super::it_this::LambdaParamKind;
 #[cfg(test)]
@@ -20,7 +22,8 @@ use super::lambda::{lambda_type_nth_input, lambda_type_receiver, RECEIVER_THIS_F
 use super::lambda_resolution::{ExtractedTypeKind, GenericParamSource, LambdaParamResolution};
 use super::receiver::{
     fun_trailing_lambda_this_type, lambda_receiver_type_from_context_at,
-    lambda_receiver_type_named_arg_ml, resolve_call_params,
+    lambda_receiver_type_named_arg_ml, resolve_call_params, resolve_expr_type_raw,
+    uppercase_dotted_type_prefix,
 };
 use super::sig::{last_fun_param_type_str, nth_fun_param_type_str, strip_trailing_call_args};
 use super::type_subst::{
@@ -132,9 +135,10 @@ pub(crate) fn classify_this_lambda_context(
             }
             // Known stdlib scope functions (`run`, `apply`).
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
-                if let Some(raw) = lookup_variable_type(deps, receiver_var, uri, position) {
-                    let base = raw.ident_prefix();
-                    if !base.is_empty() {
+                if let Some(raw) = resolve_expr_type_raw(receiver_expr, deps, uri, position)
+                    .or_else(|| lookup_variable_type(deps, receiver_var, uri, position))
+                {
+                    if let Some(base) = uppercase_dotted_type_prefix(&raw) {
                         return ThisLambdaCtx::Resolved(base);
                     }
                 }
@@ -153,9 +157,10 @@ pub(crate) fn classify_this_lambda_context(
     let trailing_fn = last_ident_in(callee);
     if trailing_fn == "with" {
         if let Some(recv_name) = extract_first_arg(trimmed) {
-            if let Some(raw) = lookup_variable_type(deps, recv_name, uri, position) {
-                let base = raw.ident_prefix();
-                if !base.is_empty() {
+            if let Some(raw) = resolve_expr_type_raw(recv_name, deps, uri, position)
+                .or_else(|| lookup_variable_type(deps, recv_name, uri, position))
+            {
+                if let Some(base) = uppercase_dotted_type_prefix(&raw) {
                     return ThisLambdaCtx::Resolved(base);
                 }
             }
@@ -426,10 +431,19 @@ fn cst_with_receiver_ctx(
     uri: &Url,
     position: Option<Position>,
 ) -> Option<ThisLambdaCtx> {
+    if let Some(expression) = call_expr.first_value_argument_expression(bytes) {
+        if let Some(raw) = resolve_root_node_type(expression, bytes, deps, uri) {
+            if let Some(base) = uppercase_dotted_type_prefix(&raw) {
+                return Some(ThisLambdaCtx::Resolved(base));
+            }
+        }
+    }
+
     let recv_name = call_expr.first_value_argument_text(bytes)?;
-    if let Some(raw) = lookup_variable_type(deps, &recv_name, uri, position) {
-        let base = raw.ident_prefix();
-        if !base.is_empty() {
+    if let Some(raw) = resolve_expr_type_raw(&recv_name, deps, uri, position)
+        .or_else(|| lookup_variable_type(deps, &recv_name, uri, position))
+    {
+        if let Some(base) = uppercase_dotted_type_prefix(&raw) {
             return Some(ThisLambdaCtx::Resolved(base));
         }
     }

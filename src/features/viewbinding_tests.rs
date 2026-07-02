@@ -11,10 +11,10 @@ use crate::features::definition::find_definition;
 use crate::features::hover::compute_hover;
 use crate::features::implementation::find_implementation;
 use crate::features::viewbinding::{
-    binding_field_hover_for_class, find_binding_field_references, find_binding_implementation,
-    find_layout_xml_definition, find_layout_xml_implementation, find_layout_xml_references,
-    format_binding_field_hover, java_field_type_from_detail, remap_generated_binding_definitions,
-    resolve_expected_binding_class, short_type_name,
+    binding_field_hover_for_class, find_binding_field_definition, find_binding_field_references,
+    find_binding_implementation, find_layout_xml_definition, find_layout_xml_implementation,
+    find_layout_xml_references, format_binding_field_hover, java_field_type_from_detail,
+    remap_generated_binding_definitions, resolve_expected_binding_class, short_type_name,
 };
 use crate::indexer::{binding_field_name_to_id, binding_id_to_field_name, Indexer};
 use crate::parser::nullable_at_line;
@@ -1705,4 +1705,225 @@ fn resolve_expected_binding_class_other_method_uses_profile_binding() {
         resolve_expected_binding_class(&fixture.indexer, &fixture.kotlin_uri, position, &context)
             .expect("expected ProfileBinding for other()");
     assert_eq!(expected_class, "ProfileBinding");
+}
+
+struct ChainedReceiverFixture {
+    _temp: tempfile::TempDir,
+    kotlin_uri: Url,
+    kotlin_source: String,
+    indexer: Arc<Indexer>,
+}
+
+impl ChainedReceiverFixture {
+    fn build() -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let module_root = temp.path().join("app");
+        let layout_dir = module_root.join("src/main/res/layout");
+        fs::create_dir_all(&layout_dir).expect("mkdir layout");
+
+        let default_layout_path = layout_dir.join("foo_bar.xml");
+        let profile_layout_path = layout_dir.join("profile.xml");
+        fs::write(&default_layout_path, FOO_BAR_LAYOUT).expect("write default layout");
+        fs::write(&profile_layout_path, AVATAR_LAYOUT).expect("write profile layout");
+
+        let binding_java_path = module_root.join(
+            "build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java",
+        );
+        let profile_binding_path = module_root.join(
+            "build/generated/source/databinding/com/example/app/databinding/ProfileBinding.java",
+        );
+        fs::create_dir_all(binding_java_path.parent().unwrap()).expect("mkdir binding");
+        fs::write(&binding_java_path, FOO_BAR_BINDING_JAVA).expect("write binding java");
+        fs::write(&profile_binding_path, AVATAR_BINDING_JAVA).expect("write profile binding");
+
+        // Index a competing ViewHolder first so a workspace-wide field lookup would pick
+        // ProfileBinding for `binding` if scope-aware resolution is missing.
+        let wrong_holder_path = module_root.join("src/main/kotlin/com/example/WrongViewHolder.kt");
+        fs::create_dir_all(wrong_holder_path.parent().unwrap()).expect("mkdir wrong holder");
+        let wrong_holder_source = r#"package com.example.other
+
+import com.example.app.databinding.ProfileBinding
+
+class ViewHolder(val binding: ProfileBinding)
+"#;
+        fs::write(&wrong_holder_path, wrong_holder_source).expect("write wrong holder");
+
+        let kotlin_path = module_root.join("src/main/kotlin/com/example/ChainedReceiver.kt");
+        fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir chained");
+        let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class ViewHolder(val binding: FooBarBinding)
+
+class Delegate {
+    fun bar(holder: ViewHolder) {
+        holder.binding.title.toString()
+        with(holder.binding) {
+            title.toString()
+            this.title.toString()
+        }
+        holder.binding.apply {
+            title.toString()
+            this.title.toString()
+        }
+        holder.binding.also {
+            it.title.toString()
+        }
+        holder.binding.let { bind ->
+            bind.title.toString()
+        }
+        holder.binding.let {
+            it.title.toString()
+        }
+    }
+}
+"#;
+        fs::write(&kotlin_path, kotlin_source).expect("write chained");
+
+        let indexer = Arc::new(Indexer::new());
+        indexer.workspace_root.set(temp.path().to_path_buf());
+
+        let default_layout_uri = Url::from_file_path(&default_layout_path).expect("default uri");
+        let profile_layout_uri = Url::from_file_path(&profile_layout_path).expect("profile uri");
+        let wrong_holder_uri = Url::from_file_path(&wrong_holder_path).expect("wrong holder uri");
+        let kotlin_uri = Url::from_file_path(&kotlin_path).expect("chained uri");
+
+        indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
+        indexer.index_layout_content(&profile_layout_uri, AVATAR_LAYOUT);
+        indexer.index_generated_bindings(&module_root);
+        indexer.index_content(&wrong_holder_uri, wrong_holder_source);
+        indexer.index_content(&kotlin_uri, kotlin_source);
+        indexer.set_live_lines(&kotlin_uri, kotlin_source);
+        indexer.store_live_tree(&kotlin_uri, kotlin_source);
+
+        Self {
+            _temp: temp,
+            kotlin_uri,
+            kotlin_source: kotlin_source.to_string(),
+            indexer,
+        }
+    }
+
+    fn assert_resolves_to_foo_bar(&self, line_needle: &str, word: &str, qualifier: Option<&str>) {
+        let position =
+            ViewBindingFixture::position_on_word_in_line(&self.kotlin_source, line_needle, word);
+        let context = if let Some(qualifier_name) = qualifier {
+            ViewBindingFixture::cursor_context(word, Some(qualifier_name))
+        } else {
+            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context")
+        };
+        let expected_class = resolve_expected_binding_class(
+            &self.indexer,
+            &self.kotlin_uri,
+            position,
+            &context,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "resolve_expected_binding_class returned None for {line_needle:?} word={word:?} qualifier={qualifier:?} contextual={:?}",
+                context.contextual.as_ref().map(|receiver| receiver.leaf.as_str())
+            )
+        });
+        assert_eq!(
+            expected_class, "FooBarBinding",
+            "wrong binding class for {line_needle:?} word={word:?}"
+        );
+    }
+
+    fn assert_definition_in_foo_bar(&self, line_needle: &str, word: &str) {
+        let position =
+            ViewBindingFixture::position_on_word_in_line(&self.kotlin_source, line_needle, word);
+        let context =
+            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context");
+        let response =
+            find_binding_field_definition(&self.indexer, &self.kotlin_uri, position, &context)
+                .expect("definition for {line_needle}");
+        let locations = response_locations(Some(response));
+        assert!(
+            !locations.is_empty(),
+            "expected layout remap for {line_needle}, got empty"
+        );
+        assert!(
+            locations
+                .iter()
+                .all(|location| uri_path_string(location) == "foo_bar.xml"),
+            "expected foo_bar.xml for {line_needle}, got {locations:?}"
+        );
+    }
+}
+
+#[test]
+fn resolve_expected_binding_class_chained_receiver_with_apply_also_let() {
+    let fixture = ChainedReceiverFixture::build();
+    fixture.assert_resolves_to_foo_bar(
+        "holder.binding.title.toString()",
+        "title",
+        Some("holder.binding"),
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "with(holder.binding) {\n            title.toString()",
+        "title",
+        None,
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "with(holder.binding) {\n            title.toString()\n            this.title.toString()",
+        "title",
+        Some("this"),
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "holder.binding.apply {\n            title.toString()",
+        "title",
+        None,
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "holder.binding.apply {\n            title.toString()\n            this.title.toString()",
+        "title",
+        Some("this"),
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "holder.binding.also {\n            it.title.toString()",
+        "title",
+        Some("it"),
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "holder.binding.let { bind ->\n            bind.title.toString()",
+        "title",
+        Some("bind"),
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "holder.binding.let {\n            it.title.toString()",
+        "title",
+        Some("it"),
+    );
+}
+
+#[tokio::test]
+async fn chained_receiver_binding_field_definition_resolves_to_correct_layout() {
+    let fixture = ChainedReceiverFixture::build();
+    fixture.assert_definition_in_foo_bar("holder.binding.title.toString()", "title");
+    fixture.assert_definition_in_foo_bar(
+        "with(holder.binding) {\n            title.toString()",
+        "title",
+    );
+    fixture.assert_definition_in_foo_bar(
+        "with(holder.binding) {\n            title.toString()\n            this.title.toString()",
+        "title",
+    );
+    fixture.assert_definition_in_foo_bar(
+        "holder.binding.apply {\n            title.toString()",
+        "title",
+    );
+    fixture.assert_definition_in_foo_bar(
+        "holder.binding.apply {\n            title.toString()\n            this.title.toString()",
+        "title",
+    );
+    fixture.assert_definition_in_foo_bar(
+        "holder.binding.also {\n            it.title.toString()",
+        "title",
+    );
+    fixture.assert_definition_in_foo_bar(
+        "holder.binding.let { bind ->\n            bind.title.toString()",
+        "title",
+    );
 }

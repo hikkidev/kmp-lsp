@@ -136,7 +136,7 @@ pub(super) fn forward_resolve_segments(
                 }
                 last_suffix_resolved = false;
                 if let Some(ref cur) = current_type {
-                    if let Some(resolved) = resolve_member_type_on(cur, name, deps) {
+                    if let Some(resolved) = resolve_member_type_on(cur, name, deps, uri) {
                         current_type = Some(resolved);
                         last_suffix_resolved = true;
                     } else if SCOPE_FUNCTIONS.contains(&name.as_str()) {
@@ -157,7 +157,7 @@ pub(super) fn forward_resolve_segments(
                         continue;
                     }
                     if let Some(ref cur) = current_type {
-                        if let Some(resolved) = resolve_member_type_on(cur, name, deps) {
+                        if let Some(resolved) = resolve_member_type_on(cur, name, deps, uri) {
                             current_type = Some(resolved);
                             continue;
                         }
@@ -300,6 +300,7 @@ pub(super) fn resolve_member_type_on(
     current_type: &str,
     member: &str,
     deps: &impl InferDeps,
+    uri: &Url,
 ) -> Option<String> {
     let type_name = current_type.dotted_ident_prefix();
     let type_base = type_name.last_segment();
@@ -310,7 +311,7 @@ pub(super) fn resolve_member_type_on(
     } else {
         return None;
     };
-    if let Some(field_ty) = deps.find_field_type(&effective_type, member) {
+    if let Some(field_ty) = deps.find_field_type_from(&effective_type, member, uri) {
         let subst = build_type_arg_subst(deps, &effective_type, current_type);
         let applied = crate::indexer::apply_type_subst(&field_ty, &subst);
         if is_generic_param(applied.trim_end_matches('?')) {
@@ -560,7 +561,7 @@ pub(super) fn resolve_dotted_text_type(
         if type_name.is_empty() {
             return None;
         }
-        current_type = deps.find_field_type(&type_name, field)?;
+        current_type = deps.find_field_type_from(&type_name, field, uri)?;
     }
     uppercase_dotted_type_prefix(&current_type)
 }

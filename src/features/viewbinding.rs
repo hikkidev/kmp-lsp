@@ -690,18 +690,17 @@ pub(crate) fn resolve_expected_binding_class(
                 return binding_class_from_receiver_type(&receiver_type);
             }
         }
-        let receiver_type = if qualifier == "it" || qualifier == "this" {
-            infer_receiver_type(
-                index,
-                ReceiverKind::Contextual {
-                    name: qualifier,
-                    position,
-                },
-                uri,
-            )?
-        } else {
-            infer_receiver_type_at(index, qualifier, uri, position)?
-        };
+        let receiver_type =
+            infer_receiver_type_at(index, qualifier, uri, position).or_else(|| {
+                infer_receiver_type(
+                    index,
+                    ReceiverKind::Contextual {
+                        name: qualifier,
+                        position,
+                    },
+                    uri,
+                )
+            })?;
         return binding_class_from_receiver_type(&receiver_type);
     }
 
