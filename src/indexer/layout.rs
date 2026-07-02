@@ -359,7 +359,56 @@ pub(crate) fn build_layout_file_data(
     })
 }
 
+/// Collect layout XML paths under `<module_root>/src/**/res*/layout*/`.
+fn module_layout_paths(module_root: &Path) -> Vec<PathBuf> {
+    let source_root = module_root.join("src");
+    if !source_root.is_dir() {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(&source_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.is_file() && is_layout_xml_path(path) {
+            paths.push(path.to_path_buf());
+        }
+    }
+    paths
+}
+
 impl crate::indexer::Indexer {
+    /// Index any layout XML files under `module_root` that are not yet in the layout side index.
+    ///
+    /// Returns how many files were newly indexed. Used on-demand when bulk workspace
+    /// discovery missed layouts (gitignore/fd exclusions) but navigation needs them.
+    pub(crate) fn ensure_module_layouts_indexed(&self, module_root: &Path) -> usize {
+        let mut newly_indexed = 0_usize;
+        for path in module_layout_paths(module_root) {
+            let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(&path) else {
+                continue;
+            };
+            let uri_string = uri.to_string();
+            if self.layouts.contains_key(&uri_string) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            self.index_layout_content(&uri, &content);
+            newly_indexed += 1;
+        }
+        if newly_indexed > 0 {
+            log::info!(
+                "viewbinding: on-demand indexed {newly_indexed} layout(s) under {}",
+                module_root.display()
+            );
+        }
+        newly_indexed
+    }
+
     /// Index a single layout XML file into the layout side index.
     pub(crate) fn index_layout_content(&self, uri: &tower_lsp::lsp_types::Url, content: &str) {
         let Ok(path) = uri.to_file_path() else {

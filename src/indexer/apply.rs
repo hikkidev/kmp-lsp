@@ -1088,6 +1088,20 @@ impl Indexer {
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         let paths = find_layout_files(root, matcher.as_deref());
+        log::info!(
+            "viewbinding: bulk layout discovery found {} file(s) under {}",
+            paths.len(),
+            root.display()
+        );
+        if paths.is_empty() && !self.generated_bindings.is_empty() {
+            log::warn!(
+                "viewbinding: bulk layout discovery found 0 files under {} but {} module(s) have generated bindings — layouts may be gitignored or outside fd scope",
+                root.display(),
+                self.generated_bindings.len()
+            );
+        }
+        let mut indexed_count = 0_usize;
+        let mut cache_hit_count = 0_usize;
         for path in paths {
             let Ok(uri) = Url::from_file_path(&path) else {
                 continue;
@@ -1107,6 +1121,7 @@ impl Indexer {
                     let file_size = meta.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
                     if entry.mtime_secs == mtime && entry.file_size == file_size {
                         self.layouts.insert(uri_string, Arc::clone(&entry.data));
+                        cache_hit_count += 1;
                         continue;
                     }
                 }
@@ -1114,8 +1129,13 @@ impl Indexer {
 
             if let Ok(content) = std::fs::read_to_string(&path) {
                 self.index_layout_content(&uri, &content);
+                indexed_count += 1;
             }
         }
+        log::info!(
+            "viewbinding: bulk layout indexing complete parsed={indexed_count} cache_hits={cache_hit_count} side_index_size={}",
+            self.layouts.len()
+        );
     }
 
     /// Spawn background tasks to pre-warm the completion cache for all types

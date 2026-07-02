@@ -125,6 +125,11 @@ pub(crate) trait IndexRead {
     /// before `get_file_data()` (as `build_type_param_subst_impl` does).
     fn ensure_indexed_on_demand(&self, _uri: &str) {}
 
+    /// Index layout XML files under `module_root` that are missing from the layout side index.
+    fn ensure_module_layouts_indexed(&self, _module_root: &std::path::Path) -> usize {
+        0
+    }
+
     /// Layout variants for a generated binding class in the given module (default first).
     #[allow(dead_code)] // PR 4 navigation
     fn layouts_for_binding_class(
@@ -782,6 +787,10 @@ impl IndexRead for super::Indexer {
         }
     }
 
+    fn ensure_module_layouts_indexed(&self, module_root: &std::path::Path) -> usize {
+        super::Indexer::ensure_module_layouts_indexed(self, module_root)
+    }
+
     fn jar_phase(&self) -> crate::indexer::jar_phase::JarPhase {
         self.jar_phase
             .lock()
@@ -870,6 +879,10 @@ impl IndexRead for Arc<super::Indexer> {
 
     fn ensure_indexed_on_demand(&self, uri: &str) {
         <super::Indexer as IndexRead>::ensure_indexed_on_demand(self.as_ref(), uri);
+    }
+
+    fn ensure_module_layouts_indexed(&self, module_root: &std::path::Path) -> usize {
+        <super::Indexer as IndexRead>::ensure_module_layouts_indexed(self.as_ref(), module_root)
     }
 
     fn jar_phase(&self) -> crate::indexer::jar_phase::JarPhase {

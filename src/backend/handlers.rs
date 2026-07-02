@@ -51,16 +51,23 @@ impl Backend {
 
         if let Ok(path) = uri.to_file_path() {
             if crate::indexer::is_layout_xml_path(&path) {
-                if let Some(locations) = crate::features::viewbinding::find_layout_xml_references(
+                log::info!("viewbinding: references on layout xml uri={uri}");
+                let locations = crate::features::viewbinding::find_layout_xml_references(
                     &self.indexer,
                     uri,
                     position,
                     params.context.include_declaration,
                 )
-                .await
-                {
-                    return Ok((!locations.is_empty()).then_some(locations));
-                }
+                .await;
+                return match locations {
+                    Some(locations) => Ok((!locations.is_empty()).then_some(locations)),
+                    None => {
+                        log::info!(
+                            "viewbinding: layout xml refs branch: not on @+id, returning nothing (no text-search fallback)"
+                        );
+                        Ok(None)
+                    }
+                };
             }
         }
 

@@ -66,7 +66,9 @@ pub(crate) use self::enrich::EnrichmentHandle;
 mod discover;
 
 mod layout;
-pub(crate) use self::layout::{is_layout_xml_path, LayoutCacheEntry, LayoutFileData};
+pub(crate) use self::layout::{
+    is_layout_xml_path, layout_path_components, LayoutCacheEntry, LayoutFileData,
+};
 
 mod binding_discovery;
 pub(crate) use self::binding_discovery::{
@@ -972,6 +974,17 @@ impl Indexer {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return;
+        }
+        if let Ok(path) = uri.to_file_path() {
+            if crate::indexer::layout::is_layout_xml_path(&path) {
+                if self.layouts.contains_key(uri.as_str()) {
+                    return;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    self.index_layout_content(uri, &content);
+                }
+                return;
+            }
         }
         if !self.files.contains_key(uri.as_str()) {
             if let Ok(path) = uri.to_file_path() {

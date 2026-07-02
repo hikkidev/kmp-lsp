@@ -16,7 +16,8 @@ use crate::indexer::NodeExt;
 use crate::indexer::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
     find_this_context_in_lines, is_layout_xml_path, layout_name_for_binding_class,
-    module_root_for_generated_file, module_root_for_source_file, IndexRead, Indexer, ThisContext,
+    layout_path_components, module_root_for_generated_file, module_root_for_source_file, IndexRead,
+    Indexer, ThisContext,
 };
 use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
@@ -49,6 +50,10 @@ pub(crate) fn remap_generated_binding_definitions<I: IndexRead>(
     index: &I,
     locations: Vec<Location>,
 ) -> Vec<Location> {
+    log::info!(
+        "viewbinding: remap_generated_binding_definitions pre_remap_count={}",
+        locations.len()
+    );
     let mut remapped = Vec::new();
     for location in locations {
         if !index.is_generated_binding_uri(location.uri.as_str()) {
@@ -56,8 +61,18 @@ pub(crate) fn remap_generated_binding_definitions<I: IndexRead>(
             continue;
         }
         let Some(targets) = remap_single_binding_location(index, &location) else {
+            log::info!(
+                "viewbinding: remap miss, keeping generated Java fallback uri={}",
+                location.uri
+            );
+            remapped.push(location);
             continue;
         };
+        log::info!(
+            "viewbinding: remap hit uri={} target_count={}",
+            location.uri,
+            targets.len()
+        );
         remapped.extend(targets);
     }
     remapped
@@ -106,8 +121,23 @@ fn remap_binding_class<I: IndexRead>(
     symbol: &SymbolEntry,
     module_root: &Path,
 ) -> Option<Vec<Location>> {
-    let entries = index.layout_uris_for_binding_class(&symbol.name, module_root);
+    let mut entries = index.layout_uris_for_binding_class(&symbol.name, module_root);
     if entries.is_empty() {
+        let on_demand = index.ensure_module_layouts_indexed(module_root);
+        log::info!(
+            "viewbinding: remap_binding_class class={} module={} on_demand_indexed={}",
+            symbol.name,
+            module_root.display(),
+            on_demand
+        );
+        entries = index.layout_uris_for_binding_class(&symbol.name, module_root);
+    }
+    if entries.is_empty() {
+        log::info!(
+            "viewbinding: remap_binding_class no layouts for class={} module={}",
+            symbol.name,
+            module_root.display()
+        );
         return None;
     }
     Some(
@@ -138,6 +168,8 @@ fn remap_binding_field<I: IndexRead>(
     let class_name = symbol.container.as_deref()?;
     let layout_name = layout_name_for_binding_class(class_name)?;
 
+    index.ensure_module_layouts_indexed(module_root);
+
     let include_targets = index.include_tag_for_field(module_root, &layout_name, &symbol.name);
     if !include_targets.is_empty() {
         return Some(locations_from_uri_ranges(include_targets));
@@ -146,6 +178,12 @@ fn remap_binding_field<I: IndexRead>(
     let view_id = binding_field_name_to_id(&symbol.name);
     let id_targets = index.layouts_declaring_view_id(module_root, &layout_name, &view_id);
     if id_targets.is_empty() {
+        log::info!(
+            "viewbinding: remap_binding_field no @+id for field={} layout={} module={}",
+            symbol.name,
+            layout_name,
+            module_root.display()
+        );
         return None;
     }
     Some(locations_from_uri_ranges(id_targets))
@@ -158,6 +196,7 @@ fn remap_root_view<I: IndexRead>(
 ) -> Option<Vec<Location>> {
     let class_name = binding_class_from_file_data(file_data)?;
     let layout_name = layout_name_for_binding_class(&class_name)?;
+    index.ensure_module_layouts_indexed(module_root);
     let entries = index.layout_uris_for_binding_class(&class_name, module_root);
     let targets: Vec<Location> = entries
         .into_iter()
@@ -256,6 +295,37 @@ pub(crate) fn find_binding_implementation(
         .filter(|location| index.is_generated_binding_uri(location.uri.as_str()))
         .collect();
     locs_to_opt_response(binding_locations)
+}
+
+/// Definition on `binding.field` — resolve straight to `@+id/…` via the layout side index.
+pub(crate) fn find_binding_field_definition(
+    index: &Indexer,
+    uri: &Url,
+    position: Position,
+    ctx: &CursorContext,
+) -> Option<GotoDefinitionResponse> {
+    if ctx.word.starts_with_uppercase() {
+        return None;
+    }
+    let expected_class = resolve_expected_binding_class(index, uri, position, ctx)?;
+    let path = uri.to_file_path().ok()?;
+    let module_root = module_root_for_source_file(&path)?;
+    let layout_name = layout_name_for_binding_class(&expected_class)?;
+    log::info!(
+        "viewbinding: find_binding_field_definition field={} qualifier={:?} class={} module={}",
+        ctx.word,
+        ctx.qualifier,
+        expected_class,
+        module_root.display()
+    );
+    index.ensure_module_layouts_indexed(&module_root);
+    let include_targets = index.include_tag_for_field(&module_root, &layout_name, &ctx.word);
+    if !include_targets.is_empty() {
+        return locs_to_opt_response(locations_from_uri_ranges(include_targets));
+    }
+    let view_id = binding_field_name_to_id(&ctx.word);
+    let id_targets = index.layouts_declaring_view_id(&module_root, &layout_name, &view_id);
+    locs_to_opt_response(locations_from_uri_ranges(id_targets))
 }
 
 // ─── XML-side navigation ─────────────────────────────────────────────────────
@@ -705,14 +775,23 @@ pub(crate) async fn find_binding_field_references(
 ) -> Vec<Location> {
     let candidates =
         find_references_with_qualifier(field_name, None, uri, line, include_decl, index).await;
+    let candidate_count = candidates.len();
 
-    candidates
+    let verified: Vec<Location> = candidates
         .into_iter()
         .filter(|location| !index.is_generated_binding_uri(location.uri.as_str()))
         .filter(|location| {
             verify_binding_field_reference(index, location, field_name, expected_binding_class)
         })
-        .collect()
+        .collect();
+    log::info!(
+        "viewbinding: binding field refs class={} field={} candidates={} verified={}",
+        expected_binding_class,
+        field_name,
+        candidate_count,
+        verified.len()
+    );
+    verified
 }
 
 fn verify_binding_field_reference(
@@ -945,23 +1024,44 @@ pub(crate) async fn find_layout_xml_references(
     if !is_layout_xml_path(&path) {
         return None;
     }
+    ensure_layout_side_index_for_uri(index, uri, &path);
     let layout_data = index.layout_data_for_uri(uri.as_str())?;
     let content = layout_content_for_uri(index, uri)?;
     let view_id = view_id_reference_at_position(&content, position)?;
     let field_name = binding_id_to_field_name(&view_id);
     let expected_class = binding_class_name_for_layout(&layout_data.layout_name);
     let decl_position = id_attribute_position(&content, &view_id)?;
-    Some(
-        find_binding_field_references(
-            index,
-            &expected_class,
-            &field_name,
-            uri,
-            decl_position.line,
-            include_decl,
-        )
-        .await,
+    log::info!(
+        "viewbinding: layout xml refs view_id={view_id} field={field_name} class={expected_class} layout={}",
+        layout_data.layout_name
+    );
+    let locations = find_binding_field_references(
+        index,
+        &expected_class,
+        &field_name,
+        uri,
+        decl_position.line,
+        include_decl,
     )
+    .await;
+    if locations.is_empty() {
+        log::info!(
+            "viewbinding: layout xml refs resolved nothing for view_id={view_id} class={expected_class}"
+        );
+    }
+    Some(locations)
+}
+
+fn ensure_layout_side_index_for_uri(index: &Indexer, uri: &Url, path: &Path) {
+    if index.layout_data_for_uri(uri.as_str()).is_none() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            index.index_layout_content(uri, &content);
+            log::info!("viewbinding: on-demand indexed layout uri={uri}");
+        }
+    }
+    if let Some(components) = layout_path_components(path) {
+        index.ensure_module_layouts_indexed(&components.module_root);
+    }
 }
 
 fn id_attribute_position(content: &str, view_id: &str) -> Option<Position> {
