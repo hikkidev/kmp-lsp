@@ -1,4 +1,4 @@
-use crate::stdlib::dot_completions_for;
+use crate::stdlib::{dot_completions_for, StdlibReceiverFamily};
 
 /// Language-aware dot completions. Returns Kotlin stdlib completions for Kotlin
 /// and `.kts` files, Swift-specific templates for `.swift` files, and nothing
@@ -6,11 +6,12 @@ use crate::stdlib::dot_completions_for;
 /// portion of the request URI (e.g., "/home/user/project/src/Foo.kt").
 pub(crate) fn dot_completions_for_lang(
     from_path: &str,
-    receiver_type: &str,
+    receiver_nullable: bool,
     snippets: bool,
+    family: Option<StdlibReceiverFamily>,
 ) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     match crate::Language::from_path(from_path) {
-        crate::Language::Kotlin => dot_completions_for(receiver_type, snippets),
+        crate::Language::Kotlin => dot_completions_for(family, receiver_nullable, snippets),
         crate::Language::Swift => swift_dot_completions(snippets),
         crate::Language::Java => Vec::new(),
     }

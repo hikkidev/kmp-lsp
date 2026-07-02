@@ -1,7 +1,7 @@
 use super::*;
 use crate::indexer::Indexer;
 use crate::parser::{parse_java, parse_kotlin};
-use crate::stdlib::dot_completions_for;
+use crate::stdlib::{dot_completions_for, stdlib_receiver_family, StdlibReceiverFamily};
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemTag, InsertTextFormat, Url};
 
 fn uri(path: &str) -> Url {
@@ -1573,7 +1573,7 @@ fn complete_bare_test_symbols_visible_only_to_test_callers() {
 
 #[test]
 fn dot_completions_string_receiver_has_string_fns() {
-    let items = dot_completions_for("String", false);
+    let items = dot_completions_for(Some(StdlibReceiverFamily::Text), false, false);
     let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(names.contains(&"trim"), "String should have trim()");
     assert!(names.contains(&"split"), "String should have split()");
@@ -1588,7 +1588,7 @@ fn dot_completions_string_receiver_has_string_fns() {
 
 #[test]
 fn dot_completions_list_receiver_has_collection_fns() {
-    let items = dot_completions_for("List", false);
+    let items = dot_completions_for(Some(StdlibReceiverFamily::Collection), false, false);
     let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(names.contains(&"map"), "List should have map()");
     assert!(names.contains(&"filter"), "List should have filter()");
@@ -1601,7 +1601,7 @@ fn dot_completions_list_receiver_has_collection_fns() {
 
 #[test]
 fn dot_completions_custom_type_has_scope_fns_only() {
-    let items = dot_completions_for("MyDomainClass", false);
+    let items = dot_completions_for(None, false, false);
     let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(names.contains(&"let"), "domain type should have let()");
     assert!(names.contains(&"apply"), "domain type should have apply()");
@@ -1613,6 +1613,291 @@ fn dot_completions_custom_type_has_scope_fns_only() {
     assert!(
         !names.contains(&"filter"),
         "domain type should NOT have filter()"
+    );
+}
+
+#[test]
+fn stdlib_receiver_family_classifies_fqn_list() {
+    assert_eq!(
+        stdlib_receiver_family("kotlin.collections.List"),
+        Some(StdlibReceiverFamily::Collection)
+    );
+}
+
+#[test]
+fn stdlib_receiver_family_rejects_prefix_false_positive() {
+    assert_eq!(stdlib_receiver_family("ListenerRegistry"), None);
+}
+
+#[test]
+fn stdlib_receiver_family_rejects_generic_param() {
+    assert_eq!(stdlib_receiver_family("T"), None);
+    assert_eq!(stdlib_receiver_family("V"), None);
+}
+
+#[test]
+fn stdlib_receiver_family_rejects_iterator() {
+    assert_eq!(stdlib_receiver_family("Iterator"), None);
+    assert_eq!(stdlib_receiver_family("ListIterator"), None);
+}
+
+#[test]
+fn dot_completion_unindexed_list_shows_collection_fns() {
+    let idx = Indexer::new();
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "fun main() {\n",
+            "    val items: List<String> = emptyList()\n",
+            "    items.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "items", &app_uri, false, Some(3));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"map"),
+        "unindexed List should offer map(): {labels:?}"
+    );
+    assert!(
+        labels.contains(&"filter"),
+        "unindexed List should offer filter(): {labels:?}"
+    );
+    assert!(
+        labels.contains(&"size"),
+        "unindexed List should offer size: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"isEmpty"),
+        "unindexed List should offer isEmpty(): {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_unindexed_map_shows_map_fns() {
+    let idx = Indexer::new();
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "fun main() {\n",
+            "    val cache: Map<String, Int> = emptyMap()\n",
+            "    cache.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "cache", &app_uri, false, Some(3));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"keys"),
+        "unindexed Map should offer keys: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"getOrDefault"),
+        "unindexed Map should offer getOrDefault(): {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_unknown_type_without_index_has_no_stdlib_fns() {
+    let idx = Indexer::new();
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "fun main() {\n",
+            "    val value: Foo = Foo()\n",
+            "    value.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "value", &app_uri, false, Some(3));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        !labels.contains(&"map"),
+        "unknown Foo should not get collection stdlib fns: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"filter"),
+        "unknown Foo should not get collection stdlib fns: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_import_shadowed_list_is_not_stdlib() {
+    let idx = Indexer::new();
+    let list_uri = uri("/lib/List.kt");
+    idx.index_content(
+        &list_uri,
+        "package com.foo\nclass List { fun projectOnly() {} }\n",
+    );
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "import com.foo.List\n",
+            "fun main() {\n",
+            "    val items: List<String> = List()\n",
+            "    items.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "items", &app_uri, false, Some(4));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"projectOnly"),
+        "import-shadowed List should resolve project members: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"map"),
+        "import-shadowed List must not get stdlib collection fns: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_hierarchy_linked_hash_map_receiver() {
+    let idx = Indexer::new();
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "class MyCache : LinkedHashMap<String, Int>()\n",
+            "fun main() {\n",
+            "    val cache = MyCache()\n",
+            "    cache.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "cache", &app_uri, false, Some(4));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"keys"),
+        "LinkedHashMap subclass should inherit map stdlib fns: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_hierarchy_array_list_receiver() {
+    let idx = Indexer::new();
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "class Names : ArrayList<String>()\n",
+            "fun main() {\n",
+            "    val names = Names()\n",
+            "    names.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "names", &app_uri, false, Some(4));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"map"),
+        "ArrayList subclass should inherit collection stdlib fns: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"filter"),
+        "ArrayList subclass should inherit collection stdlib fns: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_hierarchy_two_level_chain() {
+    let idx = Indexer::new();
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "open class Middle : ArrayList<String>()\n",
+            "class Bottom : Middle()\n",
+            "fun main() {\n",
+            "    val values = Bottom()\n",
+            "    values.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "values", &app_uri, false, Some(5));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"map"),
+        "two-level stdlib hierarchy should inherit collection fns: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_hierarchy_without_stdlib_ancestors_scope_only() {
+    let idx = Indexer::new();
+    let base_uri = uri("/lib/Base.kt");
+    idx.index_content(
+        &base_uri,
+        "package lib\nopen class Base { fun baseOnly() {} }\n",
+    );
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "import lib.Base\n",
+            "class Child : Base()\n",
+            "fun main() {\n",
+            "    val child = Child()\n",
+            "    child.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "child", &app_uri, false, Some(5));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"baseOnly"),
+        "project hierarchy member should appear: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"map"),
+        "non-stdlib hierarchy should not get collection stdlib fns: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_iterator_receiver_has_no_collection_fns() {
+    let idx = Indexer::new();
+    let app_uri = uri("/app/Main.kt");
+    idx.index_content(
+        &app_uri,
+        concat!(
+            "package app\n",
+            "fun main() {\n",
+            "    val iter: Iterator<String> = emptyList<String>().iterator()\n",
+            "    iter.\n",
+            "}\n",
+        ),
+    );
+
+    let items = complete_dot(&idx, "iter", &app_uri, false, Some(3));
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        !labels.contains(&"map"),
+        "Iterator should not get collection stdlib fns: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"filter"),
+        "Iterator should not get collection stdlib fns: {labels:?}"
     );
 }
 

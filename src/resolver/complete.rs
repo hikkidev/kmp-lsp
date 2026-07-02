@@ -8,17 +8,21 @@ use tower_lsp::lsp_types::{
 use crate::indexer::Indexer;
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
+use crate::stdlib::{stdlib_receiver_family, StdlibReceiverFamily};
 use crate::stdlib_tail::dot_completions_for_lang;
 use crate::types::{CallerContext, ImportEntry, SourceSet, Visibility};
 use crate::LinesExt;
 use crate::StrExt;
 
+use super::fd::import_package_prefix;
+use super::hierarchy::stdlib_family_in_hierarchy;
 use super::infer::{
     find_field_type_in_class, find_fun_return_type_by_name, find_method_return_type,
     infer_receiver_type, infer_receiver_type_at, infer_variable_type_raw, ReceiverKind,
     ReceiverType,
 };
 use super::infer_lines::infer_callable_param_return_type;
+use super::resolve::is_stdlib;
 use super::{
     already_imported, ensure_file_data, fqns_for_name, resolve_symbol_no_rg, walk_hierarchy,
 };
@@ -630,28 +634,29 @@ fn complete_dot_expr(
     };
 
     let mut items = Vec::new();
-    let file_found =
-        resolve_dot_receiver_file(indexer, &receiver_type.outer, from_uri).map(|file_uri| {
-            let context = DotCompletionContext {
-                receiver_type: receiver_type.clone(),
-                file_uri,
-            };
-            items.extend(direct_dot_completion_items(
-                indexer,
-                &context,
-                from_uri,
-                cursor_line,
-            ));
-            filter_inaccessible_completion_items(&mut items);
-            collect_inherited_dot_completion_items(
-                indexer,
-                &context,
-                from_uri,
-                snippets,
-                cursor_line,
-                &mut items,
-            );
-        });
+    let mut resolved_file_uri = None;
+    if let Some(file_uri) = resolve_dot_receiver_file(indexer, &receiver_type.outer, from_uri) {
+        let context = DotCompletionContext {
+            receiver_type: receiver_type.clone(),
+            file_uri: file_uri.clone(),
+        };
+        items.extend(direct_dot_completion_items(
+            indexer,
+            &context,
+            from_uri,
+            cursor_line,
+        ));
+        filter_inaccessible_completion_items(&mut items);
+        collect_inherited_dot_completion_items(
+            indexer,
+            &context,
+            from_uri,
+            snippets,
+            cursor_line,
+            &mut items,
+        );
+        resolved_file_uri = Some(file_uri);
+    }
 
     dedup_completion_labels(&mut items);
     strip_completion_snippets(&mut items, snippets);
@@ -661,7 +666,7 @@ fn complete_dot_expr(
         &receiver_type,
         from_uri,
         snippets,
-        file_found.is_some(),
+        resolved_file_uri.as_deref(),
         &mut items,
     );
     items
@@ -888,26 +893,83 @@ fn strip_completion_snippets(items: &mut [CompletionItem], snippets: bool) {
     }
 }
 
+fn receiver_stdlib_family(
+    indexer: &Indexer,
+    receiver_type: &ReceiverType,
+    resolved_file_uri: Option<&str>,
+    from_uri: &Url,
+) -> Option<StdlibReceiverFamily> {
+    if is_stdlib_type_import_shadowed(indexer, from_uri, &receiver_type.leaf) {
+        return None;
+    }
+
+    if let Some(family) = stdlib_receiver_family(&receiver_type.qualified) {
+        return Some(family);
+    }
+
+    let resolved_file_uri = resolved_file_uri?;
+    stdlib_family_in_hierarchy(
+        indexer,
+        &receiver_type.leaf,
+        resolved_file_uri,
+        from_uri,
+        4,
+        stdlib_receiver_family,
+    )
+}
+
+fn is_stdlib_type_import_shadowed(indexer: &Indexer, from_uri: &Url, simple_name: &str) -> bool {
+    let file_data = match ensure_file_data(indexer, from_uri) {
+        Some(file_data) => file_data,
+        None => return false,
+    };
+    file_data.imports.iter().any(|import_entry| {
+        import_entry.local_name == simple_name
+            && !is_stdlib(&import_package_prefix(&import_entry.full_path))
+    })
+}
+
 fn append_dot_tail_completions(
     indexer: &Indexer,
     receiver_type: &ReceiverType,
     from_uri: &Url,
     snippets: bool,
-    file_found: bool,
+    resolved_file_uri: Option<&str>,
     items: &mut Vec<CompletionItem>,
 ) {
     let from_path = from_uri.path();
-    // Stdlib fns (scope, collections, strings) are only meaningful when we confirmed a
-    // concrete receiver type via file resolution. Skipping them for unresolved types
-    // (e.g. generic type params like `T`) preserves the type-hint placeholder fallback.
-    if file_found {
-        items.extend(dot_completions_for_lang(
-            from_path,
-            &receiver_type.qualified,
-            snippets,
-        ));
+    let language = crate::Language::from_path(from_path);
+    match language {
+        crate::Language::Kotlin => {
+            let stdlib_family =
+                receiver_stdlib_family(indexer, receiver_type, resolved_file_uri, from_uri);
+            // Stdlib completions when the receiver type was resolved to a source file,
+            // or when the inferred type is a known stdlib family (even without an index
+            // entry, e.g. `List<String>`). Skipping for unresolved non-stdlib types
+            // preserves the type-hint placeholder fallback.
+            let include_stdlib = resolved_file_uri.is_some() || stdlib_family.is_some();
+            if include_stdlib {
+                items.extend(dot_completions_for_lang(
+                    from_path,
+                    receiver_type.nullable,
+                    snippets,
+                    stdlib_family,
+                ));
+            }
+        }
+        crate::Language::Swift => {
+            if resolved_file_uri.is_some() {
+                items.extend(dot_completions_for_lang(
+                    from_path,
+                    receiver_type.nullable,
+                    snippets,
+                    None,
+                ));
+            }
+        }
+        crate::Language::Java => {}
     }
-    if crate::Language::from_path(from_path) == crate::Language::Kotlin {
+    if language == crate::Language::Kotlin {
         // Extension functions from the reverse index: O(1) lookup, safe for any type.
         items.extend(extension_fn_completions(
             indexer,

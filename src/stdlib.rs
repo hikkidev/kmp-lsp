@@ -522,6 +522,114 @@ pub(crate) fn hover(name: &str) -> Option<String> {
     Some(format!("```kotlin\n{body}\n```\n*(Kotlin stdlib)*"))
 }
 
+// ─── Stdlib receiver classification ───────────────────────────────────────────
+
+/// Known Kotlin stdlib receiver families for dot-completion filtering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StdlibReceiverFamily {
+    Collection,
+    Map,
+    Text,
+}
+
+const STDLIB_TYPE_PREFIXES: &[&str] = &[
+    "kotlin.collections.",
+    "kotlin.sequences.",
+    "kotlin.text.",
+    "java.util.",
+    "kotlin.",
+];
+
+const COLLECTION_TYPE_NAMES: &[&str] = &[
+    "Iterable",
+    "MutableIterable",
+    "Collection",
+    "MutableCollection",
+    "List",
+    "MutableList",
+    "Set",
+    "MutableSet",
+    "ArrayList",
+    "HashSet",
+    "LinkedHashSet",
+    "ArrayDeque",
+    "AbstractCollection",
+    "AbstractList",
+    "AbstractSet",
+    "AbstractMutableCollection",
+    "AbstractMutableList",
+    "AbstractMutableSet",
+    "Sequence",
+    "Array",
+    "IntArray",
+    "LongArray",
+    "ShortArray",
+    "ByteArray",
+    "CharArray",
+    "FloatArray",
+    "DoubleArray",
+    "BooleanArray",
+    "UByteArray",
+    "UShortArray",
+    "UIntArray",
+    "ULongArray",
+];
+
+const MAP_TYPE_NAMES: &[&str] = &[
+    "Map",
+    "MutableMap",
+    "HashMap",
+    "LinkedHashMap",
+    "AbstractMap",
+    "AbstractMutableMap",
+    "SortedMap",
+];
+
+const TEXT_TYPE_NAMES: &[&str] = &["String", "CharSequence", "StringBuilder"];
+
+fn type_name_for_stdlib_lookup(qualified: &str) -> Option<&str> {
+    let mut name = qualified;
+    let mut had_prefix = false;
+    loop {
+        let stripped = STDLIB_TYPE_PREFIXES
+            .iter()
+            .find_map(|prefix| name.strip_prefix(prefix));
+        match stripped {
+            Some(rest) => {
+                name = rest;
+                had_prefix = true;
+            }
+            None => break,
+        }
+    }
+    if had_prefix || !name.contains('.') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn family_for_type_name(type_name: &str) -> Option<StdlibReceiverFamily> {
+    if COLLECTION_TYPE_NAMES.contains(&type_name) {
+        Some(StdlibReceiverFamily::Collection)
+    } else if MAP_TYPE_NAMES.contains(&type_name) {
+        Some(StdlibReceiverFamily::Map)
+    } else if TEXT_TYPE_NAMES.contains(&type_name) {
+        Some(StdlibReceiverFamily::Text)
+    } else {
+        None
+    }
+}
+
+/// Classify a receiver type name as a known stdlib family using exact name matching.
+///
+/// Supports FQN forms by stripping canonical package prefixes first. Dotted
+/// non-stdlib names (e.g. `com.example.Outer.Inner`) are not classified.
+pub(crate) fn stdlib_receiver_family(qualified: &str) -> Option<StdlibReceiverFamily> {
+    let type_name = type_name_for_stdlib_lookup(qualified)?;
+    family_for_type_name(type_name)
+}
+
 // ── Cached completion lists ───────────────────────────────────────────────────
 //
 // Both dot_completions() and bare_completions() are called on every keystroke.
@@ -582,54 +690,30 @@ fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::Completio
     items
 }
 
-/// Returns stdlib dot-completions filtered to those applicable for `receiver_type`.
-/// Falls back to scope-functions-only for unknown project types.
+/// Returns stdlib dot-completions for the given receiver family.
+///
+/// When `family` is `None`, only universal scope functions are returned (for
+/// indexed project types whose definition was found). When `family` is `Some`,
+/// collection/map/text extensions are included according to the classification.
 pub(crate) fn dot_completions_for(
-    receiver_type: &str,
+    family: Option<StdlibReceiverFamily>,
+    is_nullable: bool,
     snippets: bool,
 ) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::CompletionItemKind;
 
-    let rt = receiver_type.to_ascii_lowercase();
-    let is_string = rt == "string" || rt == "charsequence" || rt == "stringbuilder";
-    let is_collection = rt.starts_with("list")
-        || rt.starts_with("mutablelist")
-        || rt.starts_with("set")
-        || rt.starts_with("mutableset")
-        || rt.starts_with("collection")
-        || rt.starts_with("iterable")
-        || rt.starts_with("sequence")
-        || rt.starts_with("arraylist")
-        || rt.starts_with("hashset")
-        || rt.starts_with("linkedhashset")
-        || rt.starts_with("array")
-        || rt == "intarray"
-        || rt == "longarray"
-        || rt == "floatarray"
-        || rt == "doublearray"
-        || rt == "booleanarray";
-    let is_map = rt.starts_with("map")
-        || rt.starts_with("mutablemap")
-        || rt.starts_with("hashmap")
-        || rt.starts_with("linkedhashmap")
-        || rt.starts_with("sortedmap");
-    let is_nullable = receiver_type.ends_with('?');
-
-    let sources: Vec<&[StdlibEntry]> = if is_string {
-        vec![
+    let sources: Vec<&[StdlibEntry]> = match family {
+        Some(StdlibReceiverFamily::Text) => vec![
             SCOPE_FUNS,
             STRING_FUNS,
             if is_nullable { NULLABLE_FUNS } else { &[] },
-        ]
-    } else if is_collection || is_map {
-        vec![
+        ],
+        Some(StdlibReceiverFamily::Collection) | Some(StdlibReceiverFamily::Map) => vec![
             SCOPE_FUNS,
             COLLECTION_FUNS,
             if is_nullable { NULLABLE_FUNS } else { &[] },
-        ]
-    } else {
-        // Unknown / project type: only universal scope fns (let/run/apply/also/takeIf/toString…)
-        vec![SCOPE_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }]
+        ],
+        None => vec![SCOPE_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }],
     };
 
     let mut seen = std::collections::HashSet::new();

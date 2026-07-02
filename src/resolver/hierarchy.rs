@@ -85,6 +85,48 @@ fn supertype_targets(idx: &Indexer, class_name: &str, class_uri: &str) -> Vec<(S
         .collect()
 }
 
+fn supertype_names_for_class(idx: &Indexer, class_name: &str, class_uri: &str) -> Vec<String> {
+    use tower_lsp::lsp_types::Url;
+    let Ok(uri) = Url::parse(class_uri) else {
+        return vec![];
+    };
+    let Some(file_data) = super::ensure_file_data(idx, &uri) else {
+        return vec![];
+    };
+    super_names_for_class(&file_data, class_name)
+}
+
+/// Walk indexed supertypes and return the first matching stdlib receiver family.
+pub(crate) fn stdlib_family_in_hierarchy(
+    idx: &Indexer,
+    start_class: &str,
+    start_uri: &str,
+    from_uri: &tower_lsp::lsp_types::Url,
+    max_depth: usize,
+    classify: impl Fn(&str) -> Option<crate::stdlib::StdlibReceiverFamily>,
+) -> Option<crate::stdlib::StdlibReceiverFamily> {
+    let mut visited = HashSet::from([(start_uri.to_owned(), start_class.to_owned())]);
+    let mut stack = vec![(start_class.to_owned(), start_uri.to_owned(), 0usize)];
+
+    while let Some((class_name, class_uri, depth)) = stack.pop() {
+        if depth >= max_depth {
+            continue;
+        }
+        for super_name in supertype_names_for_class(idx, &class_name, &class_uri) {
+            if let Some(family) = classify(&super_name) {
+                return Some(family);
+            }
+            for location in super::resolve_symbol_no_rg(idx, &super_name, from_uri) {
+                let next_key = (location.uri.to_string(), super_name.clone());
+                if visited.insert(next_key) {
+                    stack.push((super_name.clone(), location.uri.to_string(), depth + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn super_names_for_class(file_data: &FileData, class_name: &str) -> Vec<String> {
     if class_name.is_empty() {
         return file_data
