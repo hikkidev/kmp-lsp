@@ -10,7 +10,6 @@ use crate::backend::cursor::CursorContext;
 use crate::features::definition::find_definition;
 use crate::features::hover::compute_hover;
 use crate::features::implementation::find_implementation;
-use crate::features::traits::SymbolIndex;
 use crate::features::viewbinding::{
     binding_field_hover_for_class, find_binding_field_references, find_binding_implementation,
     find_layout_xml_definition, find_layout_xml_implementation, find_layout_xml_references,
@@ -308,10 +307,9 @@ async fn hover_on_binding_field_renders_kotlin_style() {
 #[tokio::test]
 async fn hover_on_nullable_binding_field_shows_question_mark() {
     let fixture = ViewBindingFixture::build();
-    let kotlin_source = fixture.kotlin_source.replace(
-        "binding.title",
-        "binding.subtitle",
-    );
+    let kotlin_source = fixture
+        .kotlin_source
+        .replace("binding.title", "binding.subtitle");
     fixture
         .indexer
         .index_content(&fixture.kotlin_uri, &kotlin_source);
@@ -341,9 +339,79 @@ async fn hover_on_nullable_binding_field_shows_question_mark() {
 #[test]
 fn binding_field_hover_for_class_reads_nullable_flag() {
     let fixture = ViewBindingFixture::build();
-    let hover = binding_field_hover_for_class(&fixture.indexer, "FooBarBinding", "subtitle")
-        .expect("binding hover");
+    let hover = binding_field_hover_for_class(
+        &fixture.indexer,
+        &fixture.kotlin_uri,
+        "FooBarBinding",
+        "subtitle",
+    )
+    .expect("binding hover");
     assert!(hover.contains("TextView?"));
+}
+
+#[test]
+fn binding_field_hover_pairs_binding_class_to_importing_module() {
+    let fixture = ViewBindingFixture::build();
+
+    // Competing module with a same-named binding class whose `title` has a
+    // DIFFERENT field type — hover must never leak it into the app module.
+    let other_module = fixture.module_root.parent().unwrap().join("other");
+    let other_binding_java = r#"package com.example.other.databinding;
+
+import android.widget.Button;
+
+public final class FooBarBinding {
+    public final Button title;
+}
+"#;
+    let other_binding_path = other_module
+        .join("build/generated/databinding/com/example/other/databinding/FooBarBinding.java");
+    fs::create_dir_all(other_binding_path.parent().unwrap()).expect("mkdir other binding");
+    fs::write(&other_binding_path, other_binding_java).expect("write other binding");
+    fixture.indexer.index_generated_bindings(&other_module);
+
+    // App-module file importing the app-module binding: field type comes from
+    // the app module's generated Java (TextView, not Button).
+    let app_hover = binding_field_hover_for_class(
+        &fixture.indexer,
+        &fixture.kotlin_uri,
+        "FooBarBinding",
+        "title",
+    )
+    .expect("app module hover");
+    assert!(app_hover.contains("TextView"), "got: {app_hover}");
+    assert!(!app_hover.contains("Button"), "got: {app_hover}");
+
+    // App-module file importing the OTHER module's binding: the import package
+    // must win over the file's own module root.
+    let cross_module_source = r#"package com.example
+
+import com.example.other.databinding.FooBarBinding
+
+fun crossModule(binding: FooBarBinding) {
+    binding.title
+}
+"#;
+    let cross_module_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/CrossModule.kt");
+    fs::write(&cross_module_path, cross_module_source).expect("write cross module");
+    let cross_module_uri = Url::from_file_path(&cross_module_path).expect("cross module uri");
+    fixture
+        .indexer
+        .index_content(&cross_module_uri, cross_module_source);
+
+    let cross_module_hover = binding_field_hover_for_class(
+        &fixture.indexer,
+        &cross_module_uri,
+        "FooBarBinding",
+        "title",
+    )
+    .expect("cross module hover");
+    assert!(
+        cross_module_hover.contains("Button"),
+        "got: {cross_module_hover}"
+    );
 }
 
 #[tokio::test]
@@ -351,13 +419,9 @@ async fn binding_field_references_find_qualified_usages() {
     let fixture = ViewBindingFixture::build();
     let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
     let context = ViewBindingFixture::cursor_context("title", Some("binding"));
-    let expected = resolve_expected_binding_class(
-        &fixture.indexer,
-        &fixture.kotlin_uri,
-        position,
-        &context,
-    )
-    .expect("expected binding class");
+    let expected =
+        resolve_expected_binding_class(&fixture.indexer, &fixture.kotlin_uri, position, &context)
+            .expect("expected binding class");
     assert_eq!(expected, "FooBarBinding");
 
     let references = find_binding_field_references(
@@ -370,9 +434,9 @@ async fn binding_field_references_find_qualified_usages() {
     )
     .await;
     assert!(!references.is_empty());
-    assert!(references
-        .iter()
-        .all(|location| !fixture.indexer.is_generated_binding_uri(location.uri.as_str())));
+    assert!(references.iter().all(|location| !fixture
+        .indexer
+        .is_generated_binding_uri(location.uri.as_str())));
 }
 
 #[tokio::test]
@@ -394,7 +458,9 @@ fun use(competitor: Competitor) {
 "#;
     fs::write(&competitor_path, competitor_source).expect("write competitor");
     let competitor_uri = Url::from_file_path(&competitor_path).expect("competitor uri");
-    fixture.indexer.index_content(&competitor_uri, competitor_source);
+    fixture
+        .indexer
+        .index_content(&competitor_uri, competitor_source);
 
     let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
     let references = find_binding_field_references(
@@ -412,6 +478,75 @@ fun use(competitor: Competitor) {
 }
 
 #[tokio::test]
+async fn binding_field_references_include_contextual_this_and_it_receivers() {
+    let fixture = ViewBindingFixture::build();
+    let scope_function_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/ScopeFunctions.kt");
+    fs::create_dir_all(scope_function_path.parent().unwrap()).expect("mkdir scope functions");
+    let scope_function_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+fun applyBlock(binding: FooBarBinding) {
+    binding.apply { this.title }
+}
+
+fun alsoBlock(binding: FooBarBinding) {
+    binding.also { it.title }
+}
+
+class NotABinding {
+    val title: String = "misleading"
+}
+
+fun misleadingApply(competitor: NotABinding) {
+    competitor.apply { this.title }
+}
+"#;
+    fs::write(&scope_function_path, scope_function_source).expect("write scope functions");
+    let scope_function_uri = Url::from_file_path(&scope_function_path).expect("scope uri");
+    fixture
+        .indexer
+        .index_content(&scope_function_uri, scope_function_source);
+
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
+    let references = find_binding_field_references(
+        &fixture.indexer,
+        "FooBarBinding",
+        "title",
+        &fixture.kotlin_uri,
+        position.line,
+        false,
+    )
+    .await;
+
+    let this_receiver_line =
+        ViewBindingFixture::position_in(scope_function_source, "this.title").line;
+    let it_receiver_line = ViewBindingFixture::position_in(scope_function_source, "it.title").line;
+    let misleading_line =
+        ViewBindingFixture::position_in(scope_function_source, "competitor.apply").line;
+
+    let lines_in_scope_file: Vec<u32> = references
+        .iter()
+        .filter(|location| location.uri == scope_function_uri)
+        .map(|location| location.range.start.line)
+        .collect();
+    assert!(
+        lines_in_scope_file.contains(&this_receiver_line),
+        "`this.title` inside `binding.apply` must verify as a binding reference, got lines: {lines_in_scope_file:?}"
+    );
+    assert!(
+        lines_in_scope_file.contains(&it_receiver_line),
+        "`it.title` inside `binding.also` must verify as a binding reference, got lines: {lines_in_scope_file:?}"
+    );
+    assert!(
+        !lines_in_scope_file.contains(&misleading_line),
+        "`this.title` on a non-binding receiver must be excluded, got lines: {lines_in_scope_file:?}"
+    );
+}
+
+#[tokio::test]
 async fn xml_references_match_kotlin_side() {
     let fixture = ViewBindingFixture::build();
     let default_layout_uri = fixture
@@ -423,14 +558,10 @@ async fn xml_references_match_kotlin_side() {
         .expect("default layout uri");
 
     let xml_position = ViewBindingFixture::position_in(FOO_BAR_LAYOUT, "@+id/title");
-    let xml_refs = find_layout_xml_references(
-        &fixture.indexer,
-        &default_layout_uri,
-        xml_position,
-        false,
-    )
-    .await
-    .expect("xml references");
+    let xml_refs =
+        find_layout_xml_references(&fixture.indexer, &default_layout_uri, xml_position, false)
+            .await
+            .expect("xml references");
 
     let kotlin_position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
     let kotlin_refs = find_binding_field_references(

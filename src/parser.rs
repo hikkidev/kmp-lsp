@@ -1907,7 +1907,10 @@ pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility
 /// annotation/comment/blank lines. Matches `@Nullable`, `@androidx.annotation.Nullable`,
 /// and `@org.jetbrains.annotations.Nullable`.
 pub(crate) fn nullable_at_line(lines: &[String], line_no: usize) -> bool {
-    if lines.get(line_no).is_some_and(|line| line_has_nullable(line)) {
+    if lines
+        .get(line_no)
+        .is_some_and(|line| line_has_nullable(line))
+    {
         return true;
     }
     let mut index = line_no;

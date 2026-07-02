@@ -1,5 +1,7 @@
 //! ViewBinding diagnostics: build-required import warning, viewBindingIgnore, staleness.
 
+use std::path::Path;
+
 use tower_lsp::lsp_types::*;
 
 use crate::indexer::live_tree::LiveDoc;
@@ -17,7 +19,10 @@ const DIAGNOSTIC_SOURCE: &str = "kmp-lsp";
 
 /// Warn on databinding imports when the paired layout exists but binding generation is missing or opted out.
 pub(crate) fn viewbinding_import_diagnostics(index: &Indexer, uri: &Url) -> Vec<Diagnostic> {
-    if !matches!(Language::from_path(uri.path()), Language::Kotlin | Language::Java) {
+    if !matches!(
+        Language::from_path(uri.path()),
+        Language::Kotlin | Language::Java
+    ) {
         return Vec::new();
     }
 
@@ -45,8 +50,7 @@ pub(crate) fn viewbinding_import_diagnostics(index: &Indexer, uri: &Url) -> Vec<
             continue;
         }
 
-        let message = if index.any_layout_variant_ignores_view_binding(&module_root, &layout_name)
-        {
+        let message = if index.any_layout_variant_ignores_view_binding(&module_root, &layout_name) {
             "Layout opts out of ViewBinding (`tools:viewBindingIgnore`)".to_string()
         } else if !index.generated_binding_discovered(&module_root, &class_name) {
             "ViewBinding class not generated — build the project".to_string()
@@ -71,7 +75,10 @@ fn import_line_range(lines: &[String], import_path: &str) -> Option<Range> {
     let needle = format!("import {import_path}");
     for (line_index, line) in lines.iter().enumerate() {
         if line.contains(&needle) {
-            let end_col = line.chars().map(|character| character.len_utf16() as u32).sum();
+            let end_col = line
+                .chars()
+                .map(|character| character.len_utf16() as u32)
+                .sum();
             return Some(Range {
                 start: Position {
                     line: line_index as u32,
@@ -161,7 +168,7 @@ fn check_stale_binding_field(
         .and_then(|path| module_root_for_source_file(&path))?;
     let layout_name = layout_name_for_binding_class(&binding_class)?;
 
-    if !binding_field_exists(index, &binding_class, &field_name) {
+    if !binding_field_exists(index, &module_root, &binding_class, &field_name) {
         return None;
     }
     if view_id_live_for_binding_field(index, &module_root, &layout_name, &field_name) {
@@ -172,34 +179,37 @@ fn check_stale_binding_field(
         range: node_to_range(field_node),
         severity: Some(DiagnosticSeverity::INFORMATION),
         source: Some(DIAGNOSTIC_SOURCE.into()),
-        message: format!(
-            "Field `{field_name}` comes from a stale build; id no longer in layout"
-        ),
+        message: format!("Field `{field_name}` comes from a stale build; id no longer in layout"),
         ..Default::default()
     })
 }
 
-fn binding_field_exists(index: &Indexer, binding_class: &str, field_name: &str) -> bool {
-    for module in index.generated_bindings.iter() {
-        for entry in module.value().entries.values() {
-            if entry.class_name != binding_class {
-                continue;
-            }
-            let Some(file_data) = index.file_data_for(&entry.file_uri) else {
-                continue;
-            };
-            if file_data.symbols.iter().any(|symbol| {
-                symbol.name == field_name
-                    && matches!(
-                        symbol.kind,
-                        SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
-                    )
-            }) {
-                return true;
-            }
-        }
-    }
-    false
+/// True when the module's own generated binding class declares `field_name`.
+///
+/// Pairs the lookup to `module_root` so a same-named binding in another module
+/// cannot make this module's usages look like they come from a stale build.
+fn binding_field_exists(
+    index: &Indexer,
+    module_root: &Path,
+    binding_class: &str,
+    field_name: &str,
+) -> bool {
+    let Some(module) = index.generated_bindings.get(module_root) else {
+        return false;
+    };
+    let Some(entry) = module.entries.get(binding_class) else {
+        return false;
+    };
+    let Some(file_data) = index.file_data_for(&entry.file_uri) else {
+        return false;
+    };
+    file_data.symbols.iter().any(|symbol| {
+        symbol.name == field_name
+            && matches!(
+                symbol.kind,
+                SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+            )
+    })
 }
 
 fn node_to_range(node: tree_sitter::Node) -> Range {

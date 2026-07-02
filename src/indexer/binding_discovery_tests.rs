@@ -13,12 +13,11 @@ use crate::indexer::binding_discovery::{
     module_root_for_generated_file, module_root_for_source_file,
 };
 use crate::indexer::cache::{save_cache, try_load_cache, CACHE_VERSION};
-use crate::indexer::test_helpers::with_xdg_cache;
 use crate::indexer::layout::{
     build_layout_file_data, layout_path_components, parse_layout_xml, LayoutPathComponents,
 };
+use crate::indexer::test_helpers::with_xdg_cache;
 use crate::indexer::Indexer;
-use crate::types::ImportEntry;
 
 const SAMPLE_BINDING_JAVA: &str = r#"package com.example.app.databinding;
 
@@ -364,6 +363,65 @@ fn watcher_touch_reindexes_generated_binding_fixture() {
         .expect("binding uri")
         .to_string();
     assert!(indexer.is_generated_binding_uri(&binding_uri));
+}
+
+#[test]
+fn reindex_removes_index_entries_for_deleted_binding_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let app_module_root = temp.path().join("app");
+    let app_binding_path = app_module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
+    write_binding_java(&app_binding_path, SAMPLE_BINDING_JAVA);
+
+    // Competing binding with the same class name in another module — it must
+    // survive a clean build of `app`.
+    let other_module_root = temp.path().join("other");
+    let other_binding_path = other_module_root
+        .join("build/generated/databinding/com/example/other/databinding/FooBarBinding.java");
+    let other_binding_java = SAMPLE_BINDING_JAVA.replace(
+        "package com.example.app.databinding;",
+        "package com.example.other.databinding;",
+    );
+    write_binding_java(&other_binding_path, &other_binding_java);
+
+    let indexer = Indexer::new();
+    indexer.index_generated_bindings(&app_module_root);
+    indexer.index_generated_bindings(&other_module_root);
+
+    let app_qualified_key = "com.example.app.databinding.FooBarBinding";
+    let other_qualified_key = "com.example.other.databinding.FooBarBinding";
+    assert!(indexer.qualified.contains_key(app_qualified_key));
+    assert!(indexer.qualified.contains_key(other_qualified_key));
+
+    let app_binding_uri = Url::from_file_path(&app_binding_path)
+        .expect("app binding uri")
+        .to_string();
+    assert!(indexer.is_generated_binding_uri(&app_binding_uri));
+
+    // Simulate a clean build of `app`: the generated file disappears from disk.
+    fs::remove_file(&app_binding_path).expect("delete app binding");
+    indexer.index_generated_bindings(&app_module_root);
+
+    assert!(
+        !indexer.qualified.contains_key(app_qualified_key),
+        "qualified entry must not survive a clean build"
+    );
+    assert!(!indexer.is_generated_binding_uri(&app_binding_uri));
+    assert!(
+        indexer
+            .definition_locations("FooBarBinding")
+            .iter()
+            .all(|location| location.uri.as_str() != app_binding_uri),
+        "definitions must not resolve to the deleted generated path"
+    );
+
+    // The other module's same-named binding is untouched.
+    assert!(indexer.qualified.contains_key(other_qualified_key));
+    let other_binding_uri = Url::from_file_path(&other_binding_path)
+        .expect("other binding uri")
+        .to_string();
+    assert!(indexer.is_generated_binding_uri(&other_binding_uri));
 }
 
 #[test]

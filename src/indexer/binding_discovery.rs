@@ -406,6 +406,11 @@ impl super::Indexer {
             handle.watch_module(module_root);
         }
 
+        let previous_bindings = self
+            .generated_bindings
+            .get(module_root)
+            .map(|module| Arc::clone(module.value()));
+
         let discovered = discover_generated_bindings(module_root);
         let entries: HashMap<String, GeneratedBindingEntry> = discovered
             .into_iter()
@@ -418,6 +423,10 @@ impl super::Indexer {
             }),
         );
 
+        if let Some(previous_bindings) = previous_bindings {
+            self.remove_undiscovered_binding_files_from_index(&previous_bindings, &entries);
+        }
+
         for entry in entries.values() {
             let Ok(uri) = Url::parse(&entry.file_uri) else {
                 continue;
@@ -427,6 +436,27 @@ impl super::Indexer {
                     self.index_content(&uri, &content);
                 }
             }
+        }
+    }
+
+    /// Drop index entries for binding files that a re-discovery no longer sees
+    /// (deleted by a clean build, or superseded by a newer build variant).
+    /// Without this, stale `qualified`/`definitions` entries keep resolving to
+    /// old generated paths.
+    fn remove_undiscovered_binding_files_from_index(
+        &self,
+        previous_bindings: &ModuleBindings,
+        current_entries: &HashMap<String, GeneratedBindingEntry>,
+    ) {
+        for previous_entry in previous_bindings.entries.values() {
+            let still_discovered = current_entries
+                .values()
+                .any(|entry| entry.file_uri == previous_entry.file_uri);
+            if still_discovered {
+                continue;
+            }
+            self.remove_stale_for_uri(&previous_entry.file_uri);
+            self.files.remove(&previous_entry.file_uri);
         }
     }
 
@@ -567,7 +597,11 @@ impl super::Indexer {
     }
 
     /// True when a generated binding class has been discovered for `class_name` in `module_root`.
-    pub(crate) fn generated_binding_discovered(&self, module_root: &Path, class_name: &str) -> bool {
+    pub(crate) fn generated_binding_discovered(
+        &self,
+        module_root: &Path,
+        class_name: &str,
+    ) -> bool {
         self.generated_bindings
             .get(module_root)
             .is_some_and(|module| module.entries.contains_key(class_name))
@@ -575,7 +609,9 @@ impl super::Indexer {
 
     /// True when at least one layout variant exists for `layout_name` in `module_root`.
     pub(crate) fn layout_exists_for_binding(&self, module_root: &Path, layout_name: &str) -> bool {
-        !self.matching_layout_entries(module_root, layout_name).is_empty()
+        !self
+            .matching_layout_entries(module_root, layout_name)
+            .is_empty()
     }
 
     /// True when any layout variant for `layout_name` opts out via `tools:viewBindingIgnore`.

@@ -1,7 +1,5 @@
 //! Unit tests for `indexer::discover`.
 
-use std::collections::HashMap;
-
 use super::{
     find_layout_files, find_source_files, find_source_files_unconstrained, warm_discover_files,
 };

@@ -529,7 +529,11 @@ fn java_nullable_field_sets_nullable_flag() {
     let data = parse_java(
         "import androidx.annotation.Nullable;\npublic class Cfg {\n  @Nullable\n  public final String subtitle;\n}",
     );
-    let sym = data.symbols.iter().find(|s| s.name == "subtitle").expect("subtitle");
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "subtitle")
+        .expect("subtitle");
     assert!(sym.nullable, "expected @Nullable on subtitle field");
     let title_like = data.symbols.iter().find(|s| s.name == "subtitle");
     assert!(title_like.is_some());

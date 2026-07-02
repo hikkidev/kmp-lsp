@@ -12,13 +12,13 @@ use crate::backend::format::{format_contextual_hover, format_symbol_hover};
 use crate::features::viewbinding::{
     binding_field_hover_at_location, binding_field_hover_for_class, resolve_expected_binding_class,
 };
-use crate::StrExt;
 use crate::indexer::apply_type_subst;
 use crate::indexer::resolution::{
     build_subst_map, enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext,
     WorkspaceRead,
 };
 use crate::resolver::ReceiverType;
+use crate::StrExt;
 
 /// Compute a hover response for the cursor at `position` in `uri`.
 ///
@@ -55,11 +55,14 @@ fn binding_field_access_hover<W: WorkspaceRead>(
     if ctx.word.starts_with_uppercase() {
         return None;
     }
-    let expected_class = crate::features::viewbinding::resolve_expected_binding_class(
-        indexer, uri, position, ctx,
+    let expected_class =
+        crate::features::viewbinding::resolve_expected_binding_class(indexer, uri, position, ctx)?;
+    let markdown = crate::features::viewbinding::binding_field_hover_for_class(
+        indexer,
+        uri,
+        &expected_class,
+        &ctx.word,
     )?;
-    let markdown =
-        crate::features::viewbinding::binding_field_hover_for_class(indexer, &expected_class, &ctx.word)?;
     Some(make_markdown_hover(markdown))
 }
 
@@ -120,10 +123,11 @@ fn contextual_receiver_hover<W: WorkspaceRead>(
         binding_field_hover_at_location(workspace, &location, &ctx.word)
             .or_else(|| {
                 workspace.as_indexer().and_then(|indexer| {
-                    resolve_expected_binding_class(indexer, uri, position, ctx)
-                        .and_then(|class_name| {
-                            binding_field_hover_for_class(indexer, &class_name, &ctx.word)
-                        })
+                    resolve_expected_binding_class(indexer, uri, position, ctx).and_then(
+                        |class_name| {
+                            binding_field_hover_for_class(indexer, uri, &class_name, &ctx.word)
+                        },
+                    )
                 })
             })
             .unwrap_or_else(|| format_symbol_hover(&info, uri.path())),
@@ -188,9 +192,8 @@ fn resolve_hover_markdown<W: WorkspaceRead>(
         &ResolveOptions::hover(),
     )
     .map(|info| {
-        binding_field_hover_at_location(workspace, &info.location, &info.name).unwrap_or_else(
-            || format_symbol_hover(&info, uri.path()),
-        )
+        binding_field_hover_at_location(workspace, &info.location, &info.name)
+            .unwrap_or_else(|| format_symbol_hover(&info, uri.path()))
     })
 }
 

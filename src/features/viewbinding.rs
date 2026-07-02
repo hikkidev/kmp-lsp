@@ -15,12 +15,13 @@ use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::NodeExt;
 use crate::indexer::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    is_layout_xml_path, layout_name_for_binding_class, module_root_for_generated_file, IndexRead,
-    Indexer,
+    is_layout_xml_path, layout_name_for_binding_class, module_root_for_generated_file,
+    module_root_for_source_file, IndexRead, Indexer,
 };
+use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
-    KIND_NAV_EXPR, KIND_SIMPLE_IDENT, KIND_XML_ATT_VALUE, KIND_XML_DOCUMENT, KIND_XML_ELEMENT,
-    KIND_XML_EMPTY_ELEM_TAG, KIND_XML_NAME, KIND_XML_STAG,
+    KIND_NAV_EXPR, KIND_SIMPLE_IDENT, KIND_THIS_EXPR, KIND_XML_ATT_VALUE, KIND_XML_DOCUMENT,
+    KIND_XML_ELEMENT, KIND_XML_EMPTY_ELEM_TAG, KIND_XML_NAME, KIND_XML_STAG,
 };
 use crate::resolver::{
     infer::infer_field_chain_type, infer_receiver_type, infer_receiver_type_at, ReceiverKind,
@@ -423,11 +424,7 @@ pub(crate) fn format_binding_field_hover(
     nullable: bool,
 ) -> String {
     let short = short_type_name(type_name);
-    let rendered_type = if nullable {
-        format!("{short}?")
-    } else {
-        short
-    };
+    let rendered_type = if nullable { format!("{short}?") } else { short };
     let signature = format!("val {field_name}: {rendered_type}");
     format_contextual_hover(&signature, ".kt", None)
 }
@@ -449,32 +446,92 @@ pub(crate) fn java_field_type_from_detail(detail: &str, field_name: &str) -> Opt
     type_tokens.last().map(|token| token.to_string())
 }
 
-/// Kotlin-style hover for a field on a known generated binding class.
+/// Kotlin-style hover for a field on a known generated binding class, resolved
+/// as seen from the source file at `uri` (import package first, then the file's
+/// own module, then a workspace-unique match).
 pub(crate) fn binding_field_hover_for_class(
     index: &Indexer,
+    uri: &Url,
     class_name: &str,
     field_name: &str,
 ) -> Option<String> {
+    let binding_file_uri = binding_file_uri_for_source(index, uri, class_name)?;
+    let file_data = index.file_data_for(&binding_file_uri)?;
+    let symbol = file_data.symbols.iter().find(|symbol| {
+        symbol.name == field_name
+            && matches!(
+                symbol.kind,
+                SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+            )
+    })?;
+    let type_name = java_field_type_from_detail(&symbol.detail, field_name)?;
+    Some(format_binding_field_hover(
+        field_name,
+        &type_name,
+        symbol.nullable,
+    ))
+}
+
+/// Resolve the generated binding file for `class_name` as seen from the source
+/// file at `uri`, so multi-module workspaces with same-named binding classes
+/// pick the module the file actually refers to.
+fn binding_file_uri_for_source(index: &Indexer, uri: &Url, class_name: &str) -> Option<String> {
+    if let Some(imported) = binding_file_uri_from_import(index, uri, class_name) {
+        return Some(imported);
+    }
+    if let Some(own_module) = binding_file_uri_in_own_module(index, uri, class_name) {
+        return Some(own_module);
+    }
+    binding_file_uri_if_unambiguous(index, class_name)
+}
+
+/// Match the source file's import of `class_name` against each discovered
+/// binding's Java package.
+fn binding_file_uri_from_import(index: &Indexer, uri: &Url, class_name: &str) -> Option<String> {
+    let file_data = index.file_data_for(uri.as_str())?;
+    let class_suffix = format!(".{class_name}");
+    let import = file_data.imports.iter().find(|import| {
+        !import.is_star
+            && import.local_name == class_name
+            && import.full_path.ends_with(&class_suffix)
+    })?;
+    let (import_package, _class) = import.full_path.rsplit_once('.')?;
     for module in index.generated_bindings.iter() {
         let Some(entry) = module.value().entries.get(class_name) else {
             continue;
         };
-        let file_data = index.file_data_for(&entry.file_uri)?;
-        let symbol = file_data.symbols.iter().find(|symbol| {
-            symbol.name == field_name
-                && matches!(
-                    symbol.kind,
-                    SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
-                )
-        })?;
-        let type_name = java_field_type_from_detail(&symbol.detail, field_name)?;
-        return Some(format_binding_field_hover(
-            field_name,
-            &type_name,
-            symbol.nullable,
-        ));
+        let Some(binding_file_data) = index.file_data_for(&entry.file_uri) else {
+            continue;
+        };
+        if binding_file_data.package.as_deref() == Some(import_package) {
+            return Some(entry.file_uri.clone());
+        }
     }
     None
+}
+
+fn binding_file_uri_in_own_module(index: &Indexer, uri: &Url, class_name: &str) -> Option<String> {
+    let path = uri.to_file_path().ok()?;
+    let module_root = module_root_for_source_file(&path)?;
+    let module = index.generated_bindings.get(&module_root)?;
+    let entry = module.entries.get(class_name)?;
+    Some(entry.file_uri.clone())
+}
+
+/// Fall back to the single workspace-wide match; `None` when the class name is
+/// ambiguous across modules (a wrong-module answer is worse than no answer).
+fn binding_file_uri_if_unambiguous(index: &Indexer, class_name: &str) -> Option<String> {
+    let mut unique_match: Option<String> = None;
+    for module in index.generated_bindings.iter() {
+        let Some(entry) = module.value().entries.get(class_name) else {
+            continue;
+        };
+        if unique_match.is_some() {
+            return None;
+        }
+        unique_match = Some(entry.file_uri.clone());
+    }
+    unique_match
 }
 
 /// When `location` is a generated binding field, return Kotlin-style hover markdown.
@@ -566,7 +623,9 @@ fn receiver_matches_binding_class(
 ) -> bool {
     receiver_type.leaf == expected_binding_class
         || receiver_type.qualified == expected_binding_class
-        || receiver_type.qualified.ends_with(&format!(".{expected_binding_class}"))
+        || receiver_type
+            .qualified
+            .ends_with(&format!(".{expected_binding_class}"))
 }
 
 /// Find Kotlin usages of a binding field, verified by receiver type.
@@ -578,15 +637,8 @@ pub(crate) async fn find_binding_field_references(
     line: u32,
     include_decl: bool,
 ) -> Vec<Location> {
-    let candidates = find_references_with_qualifier(
-        field_name,
-        None,
-        uri,
-        line,
-        include_decl,
-        index,
-    )
-    .await;
+    let candidates =
+        find_references_with_qualifier(field_name, None, uri, line, include_decl, index).await;
 
     candidates
         .into_iter()
@@ -689,10 +741,14 @@ fn infer_receiver_type_for_node(
     uri: &Url,
 ) -> Option<ReceiverType> {
     match receiver_node.kind() {
+        KIND_THIS_EXPR => infer_contextual_receiver_type(index, receiver_node, bytes, uri, "this"),
         KIND_SIMPLE_IDENT => {
             let name = receiver_node.utf8_text_owned(bytes)?;
-            if name == "this" || name == "super" {
+            if name == "super" {
                 return None;
+            }
+            if name == "this" || name == "it" {
+                return infer_contextual_receiver_type(index, receiver_node, bytes, uri, &name);
             }
             infer_receiver_type(index, ReceiverKind::Variable(&name), uri)
         }
@@ -705,6 +761,30 @@ fn infer_receiver_type_for_node(
         }
         _ => None,
     }
+}
+
+/// Infer the type of a contextual receiver (`this` in `binding.apply { this.title }`,
+/// `it` in `binding.also { it.title }`) via lambda-scope analysis at the
+/// receiver token's position.
+fn infer_contextual_receiver_type(
+    index: &Indexer,
+    receiver_node: &Node<'_>,
+    bytes: &[u8],
+    uri: &Url,
+    contextual_name: &str,
+) -> Option<ReceiverType> {
+    let start = receiver_node.start_position();
+    let line_start_offsets = line_starts(bytes);
+    let utf16_column = ts_byte_col_to_utf16(bytes, &line_start_offsets, start.row, start.column);
+    let position = Position::new(start.row as u32, utf16_column as u32);
+    infer_receiver_type(
+        index,
+        ReceiverKind::Contextual {
+            name: contextual_name,
+            position,
+        },
+        uri,
+    )
 }
 
 fn pure_field_chain(receiver_node: &Node<'_>, bytes: &[u8]) -> Option<Vec<String>> {
