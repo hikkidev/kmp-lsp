@@ -1927,3 +1927,120 @@ async fn chained_receiver_binding_field_definition_resolves_to_correct_layout() 
         "title",
     );
 }
+
+struct InheritedGenericBindingFixture {
+    _temp: tempfile::TempDir,
+    kotlin_uri: Url,
+    kotlin_source: String,
+    indexer: Arc<Indexer>,
+}
+
+impl InheritedGenericBindingFixture {
+    fn build() -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let module_root = temp.path().join("app");
+        let layout_dir = module_root.join("src/main/res/layout");
+        fs::create_dir_all(&layout_dir).expect("mkdir layout");
+
+        let default_layout_path = layout_dir.join("foo_bar.xml");
+        fs::write(&default_layout_path, FOO_BAR_LAYOUT).expect("write default layout");
+
+        let binding_java_path = module_root.join(
+            "build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java",
+        );
+        fs::create_dir_all(binding_java_path.parent().unwrap()).expect("mkdir binding");
+        fs::write(&binding_java_path, FOO_BAR_BINDING_JAVA).expect("write binding java");
+
+        let base_path = module_root.join("src/main/kotlin/com/example/ViewBindingAdapter.kt");
+        fs::create_dir_all(base_path.parent().unwrap()).expect("mkdir base");
+        let base_source = r#"package com.example
+
+abstract class ViewBindingAdapter<T> {
+    val binding: T get() = error("not init")
+}
+"#;
+        fs::write(&base_path, base_source).expect("write base adapter");
+
+        let kotlin_path = module_root.join("src/main/kotlin/com/example/FooFragment.kt");
+        let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class FooFragment : ViewBindingAdapter<FooBarBinding>() {
+    fun bar() {
+        binding.title.toString()
+        with(binding) {
+            title.toString()
+        }
+        binding.apply {
+            title.toString()
+        }
+    }
+}
+"#;
+        fs::write(&kotlin_path, kotlin_source).expect("write fragment");
+
+        let indexer = Arc::new(Indexer::new());
+        indexer.workspace_root.set(temp.path().to_path_buf());
+
+        let default_layout_uri = Url::from_file_path(&default_layout_path).expect("default uri");
+        let base_uri = Url::from_file_path(&base_path).expect("base uri");
+        let kotlin_uri = Url::from_file_path(&kotlin_path).expect("fragment uri");
+
+        indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
+        indexer.index_generated_bindings(&module_root);
+        indexer.index_content(&base_uri, base_source);
+        indexer.index_content(&kotlin_uri, kotlin_source);
+        indexer.set_live_lines(&kotlin_uri, kotlin_source);
+        indexer.store_live_tree(&kotlin_uri, kotlin_source);
+
+        Self {
+            _temp: temp,
+            kotlin_uri,
+            kotlin_source: kotlin_source.to_string(),
+            indexer,
+        }
+    }
+
+    fn assert_resolves_to_foo_bar(&self, line_needle: &str, word: &str, qualifier: Option<&str>) {
+        let position =
+            ViewBindingFixture::position_on_word_in_line(&self.kotlin_source, line_needle, word);
+        let context = if let Some(qualifier_name) = qualifier {
+            ViewBindingFixture::cursor_context(word, Some(qualifier_name))
+        } else {
+            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context")
+        };
+        let expected_class = resolve_expected_binding_class(
+            &self.indexer,
+            &self.kotlin_uri,
+            position,
+            &context,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "resolve_expected_binding_class returned None for {line_needle:?} word={word:?} qualifier={qualifier:?} contextual={:?}",
+                context.contextual.as_ref().map(|receiver| receiver.leaf.as_str())
+            )
+        });
+        assert_eq!(
+            expected_class, "FooBarBinding",
+            "wrong binding class for {line_needle:?} word={word:?}"
+        );
+    }
+}
+
+#[test]
+fn resolve_expected_binding_class_inherited_generic_base() {
+    let fixture = InheritedGenericBindingFixture::build();
+    fixture.assert_resolves_to_foo_bar("binding.title.toString()", "title", Some("binding"));
+    fixture.assert_resolves_to_foo_bar(
+        "with(binding) {\n            title.toString()",
+        "title",
+        None,
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "binding.apply {\n            title.toString()",
+        "title",
+        None,
+    );
+}
