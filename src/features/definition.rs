@@ -8,6 +8,8 @@ use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Url};
 
 use crate::backend::cursor::CursorContext;
 use crate::features::traits::{DocumentAccess, SearchAccess, SymbolIndex};
+use crate::features::viewbinding;
+use crate::indexer::IndexRead;
 use crate::parser::parse_by_extension;
 use crate::rg;
 
@@ -28,6 +30,30 @@ pub(crate) fn locs_to_opt_response(locs: Vec<Location>) -> Option<GotoDefinition
         1 => locs.into_iter().next().map(GotoDefinitionResponse::Scalar),
         _ => Some(GotoDefinitionResponse::Array(locs)),
     }
+}
+
+fn locations_from_response(response: GotoDefinitionResponse) -> Vec<Location> {
+    match response {
+        GotoDefinitionResponse::Scalar(location) => vec![location],
+        GotoDefinitionResponse::Array(locations) => locations,
+        GotoDefinitionResponse::Link(links) => links
+            .into_iter()
+            .map(|link| Location {
+                uri: link.target_uri,
+                range: link.target_range,
+            })
+            .collect(),
+    }
+}
+
+fn remap_definition_response<I: IndexRead>(
+    index: &I,
+    response: Option<GotoDefinitionResponse>,
+) -> Option<GotoDefinitionResponse> {
+    let response = response?;
+    let locations = locations_from_response(response);
+    let remapped = viewbinding::remap_generated_binding_definitions(index, locations);
+    locs_to_opt_response(remapped)
 }
 
 // ─── rg fallback ─────────────────────────────────────────────────────────────
@@ -128,6 +154,16 @@ pub(crate) async fn goto_super_method(
 /// Handles `this`, `super`, `super.method`, contextual lambda receivers,
 /// direct qualified lookups, and rg fallback — in that priority order.
 pub(crate) async fn find_definition(
+    ctx: &CursorContext,
+    index: &(impl SymbolIndex + DocumentAccess + SearchAccess + IndexRead),
+    uri: &Url,
+    position: Position,
+) -> Option<GotoDefinitionResponse> {
+    let response = find_definition_unmapped(ctx, index, uri, position).await;
+    remap_definition_response(index, response)
+}
+
+async fn find_definition_unmapped(
     ctx: &CursorContext,
     index: &(impl SymbolIndex + DocumentAccess + SearchAccess),
     uri: &Url,

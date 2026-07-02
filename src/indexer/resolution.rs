@@ -136,9 +136,47 @@ pub(crate) trait IndexRead {
     }
 
     /// True when `uri` is a discovered generated ViewBinding Java file.
-    #[allow(dead_code)] // PR 4 remap predicate
     fn is_generated_binding_uri(&self, _uri: &str) -> bool {
         false
+    }
+
+    /// Layout side-index entry for a layout XML URI.
+    fn layout_data_for_uri(&self, _uri: &str) -> Option<Arc<crate::indexer::LayoutFileData>> {
+        None
+    }
+
+    /// Layout URIs paired with data for a binding class (default variant first).
+    fn layout_uris_for_binding_class(
+        &self,
+        _class_name: &str,
+        _module_root: &std::path::Path,
+    ) -> Vec<(String, Arc<crate::indexer::LayoutFileData>)> {
+        Vec::new()
+    }
+
+    /// Every variant declaring `@+id/{id}` for the given layout name in `module_root`.
+    fn layouts_declaring_view_id(
+        &self,
+        _module_root: &std::path::Path,
+        _layout_name: &str,
+        _id: &str,
+    ) -> Vec<(String, tower_lsp::lsp_types::Range)> {
+        Vec::new()
+    }
+
+    /// `<include>` tag ranges whose `android:id` maps to `field_name`.
+    fn include_tag_for_field(
+        &self,
+        _module_root: &std::path::Path,
+        _layout_name: &str,
+        _field_name: &str,
+    ) -> Vec<(String, tower_lsp::lsp_types::Range)> {
+        Vec::new()
+    }
+
+    /// Direct lookup in the qualified-name index (e.g. `com.example.widgets.CustomView`).
+    fn qualified_definition_locations(&self, _fqn: &str) -> Vec<Location> {
+        Vec::new()
     }
 }
 
@@ -762,6 +800,43 @@ impl IndexRead for super::Indexer {
     fn is_generated_binding_uri(&self, uri: &str) -> bool {
         super::Indexer::is_generated_binding_uri(self, uri)
     }
+
+    fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<crate::indexer::LayoutFileData>> {
+        super::Indexer::layout_data_for_uri(self, uri)
+    }
+
+    fn layout_uris_for_binding_class(
+        &self,
+        class_name: &str,
+        module_root: &std::path::Path,
+    ) -> Vec<(String, Arc<crate::indexer::LayoutFileData>)> {
+        super::Indexer::layout_uris_for_binding_class(self, class_name, module_root)
+    }
+
+    fn layouts_declaring_view_id(
+        &self,
+        module_root: &std::path::Path,
+        layout_name: &str,
+        id: &str,
+    ) -> Vec<(String, tower_lsp::lsp_types::Range)> {
+        super::Indexer::layouts_declaring_view_id(self, module_root, layout_name, id)
+    }
+
+    fn include_tag_for_field(
+        &self,
+        module_root: &std::path::Path,
+        layout_name: &str,
+        field_name: &str,
+    ) -> Vec<(String, tower_lsp::lsp_types::Range)> {
+        super::Indexer::include_tag_for_field(self, module_root, layout_name, field_name)
+    }
+
+    fn qualified_definition_locations(&self, fqn: &str) -> Vec<Location> {
+        self.qualified
+            .get(fqn)
+            .map(|location| vec![location.clone()])
+            .unwrap_or_default()
+    }
 }
 
 impl IndexRead for Arc<super::Indexer> {
@@ -815,6 +890,54 @@ impl IndexRead for Arc<super::Indexer> {
 
     fn is_generated_binding_uri(&self, uri: &str) -> bool {
         <super::Indexer as IndexRead>::is_generated_binding_uri(self.as_ref(), uri)
+    }
+
+    fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<crate::indexer::LayoutFileData>> {
+        <super::Indexer as IndexRead>::layout_data_for_uri(self.as_ref(), uri)
+    }
+
+    fn layout_uris_for_binding_class(
+        &self,
+        class_name: &str,
+        module_root: &std::path::Path,
+    ) -> Vec<(String, Arc<crate::indexer::LayoutFileData>)> {
+        <super::Indexer as IndexRead>::layout_uris_for_binding_class(
+            self.as_ref(),
+            class_name,
+            module_root,
+        )
+    }
+
+    fn layouts_declaring_view_id(
+        &self,
+        module_root: &std::path::Path,
+        layout_name: &str,
+        id: &str,
+    ) -> Vec<(String, tower_lsp::lsp_types::Range)> {
+        <super::Indexer as IndexRead>::layouts_declaring_view_id(
+            self.as_ref(),
+            module_root,
+            layout_name,
+            id,
+        )
+    }
+
+    fn include_tag_for_field(
+        &self,
+        module_root: &std::path::Path,
+        layout_name: &str,
+        field_name: &str,
+    ) -> Vec<(String, tower_lsp::lsp_types::Range)> {
+        <super::Indexer as IndexRead>::include_tag_for_field(
+            self.as_ref(),
+            module_root,
+            layout_name,
+            field_name,
+        )
+    }
+
+    fn qualified_definition_locations(&self, fqn: &str) -> Vec<Location> {
+        <super::Indexer as IndexRead>::qualified_definition_locations(self.as_ref(), fqn)
     }
 }
 

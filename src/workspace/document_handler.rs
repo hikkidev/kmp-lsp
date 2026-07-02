@@ -10,6 +10,7 @@ use crate::features::call_arg_diagnostics::call_arg_diagnostics;
 use crate::features::code_actions::missing_package_diagnostic;
 use crate::features::fill_when::when_diagnostics;
 use crate::features::nullable_call_diagnostics::nullable_dot_call_diagnostics;
+use crate::indexer::is_layout_xml_path;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::{Indexer, ProgressReporter};
 
@@ -106,7 +107,7 @@ impl DocumentHandler {
             };
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                indexer.index_content(&uri, &content);
+                index_open_file_content(&indexer, &uri, &content);
             })
             .await
             .ok();
@@ -159,7 +160,7 @@ impl DocumentHandler {
             // can reuse it without an upfront full-file clone.
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let data = indexer.index_content(&uri, &content);
+                let data = index_open_file_content(&indexer, &uri, &content);
                 Arc::clone(&indexer).prewarm_completion_cache(&uri);
                 (data, content)
             })
@@ -283,7 +284,7 @@ impl DocumentHandler {
             if let Ok(permit) = semaphore.acquire_owned().await {
                 let _ = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    indexer.index_content(&uri, &content);
+                    index_open_file_content(&indexer, &uri, &content);
                 })
                 .await;
             }
@@ -382,6 +383,22 @@ impl DocumentHandler {
 
 fn has_any_marker(directory: &Path, markers: &[&str]) -> bool {
     markers.iter().any(|marker| directory.join(marker).exists())
+}
+
+fn index_open_file_content(
+    indexer: &Indexer,
+    uri: &Url,
+    content: &str,
+) -> Option<Arc<crate::types::FileData>> {
+    if uri
+        .to_file_path()
+        .is_ok_and(|path| is_layout_xml_path(&path))
+    {
+        indexer.index_layout_content(uri, content);
+        None
+    } else {
+        indexer.index_content(uri, content)
+    }
 }
 
 #[cfg(test)]
