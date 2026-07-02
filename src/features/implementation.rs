@@ -11,10 +11,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, SymbolKind, Url};
+use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, SymbolKind, Url};
 
+use crate::backend::cursor::CursorContext;
 use crate::features::definition::locs_to_opt_response;
 use crate::features::traits::{DocumentAccess, SearchAccess, SymbolIndex};
+use crate::features::viewbinding;
+use crate::indexer::IndexRead;
 use crate::rg;
 use crate::types::FileData;
 
@@ -24,11 +27,17 @@ use crate::types::FileData;
 ///   returns the `override fun` locations across all implementors.
 /// - Otherwise, returns the class/struct locations that implement the named type.
 pub(crate) async fn find_implementation(
-    word: &str,
-    index: &(impl SymbolIndex + DocumentAccess + SearchAccess),
+    ctx: &CursorContext,
+    index: &(impl SymbolIndex + DocumentAccess + SearchAccess + IndexRead),
     uri: &Url,
-    line: u32,
+    position: Position,
 ) -> Option<GotoDefinitionResponse> {
+    if let Some(response) = viewbinding::find_binding_implementation(index, ctx, uri, position) {
+        return Some(response);
+    }
+
+    let word = &ctx.word;
+    let line = position.line;
     if let Some(declaring_class) = declaring_class_of_method(index, uri, word, line) {
         find_method_implementations(word, &declaring_class, index, uri).await
     } else {

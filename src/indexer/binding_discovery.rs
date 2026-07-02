@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use dashmap::DashSet;
 use tokio::sync::mpsc;
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{Range, Url};
 use walkdir::WalkDir;
 
 use crate::indexer::layout::LayoutFileData;
@@ -134,6 +134,11 @@ fn pascal_case_to_snake_case(name: &str) -> String {
         result.extend(character.to_lowercase());
     }
     result
+}
+
+/// ViewBinding field name → layout view id (`fooBar` → `foo_bar`).
+pub(crate) fn binding_field_name_to_id(field_name: &str) -> String {
+    pascal_case_to_snake_case(field_name)
 }
 
 // ─── Package verification ─────────────────────────────────────────────────────
@@ -456,8 +461,91 @@ impl super::Indexer {
         layouts
     }
 
+    /// Direct read from the layout side index.
+    pub(crate) fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<LayoutFileData>> {
+        self.layouts.get(uri).map(|entry| Arc::clone(entry.value()))
+    }
+
+    fn matching_layout_entries(
+        &self,
+        module_root: &Path,
+        layout_name: &str,
+    ) -> Vec<(String, Arc<LayoutFileData>)> {
+        let mut entries: Vec<(String, Arc<LayoutFileData>)> = self
+            .layouts
+            .iter()
+            .filter_map(|entry| {
+                let data = entry.value();
+                if data.module_root.as_path() == module_root && data.layout_name == layout_name {
+                    Some((entry.key().clone(), Arc::clone(data)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            match (
+                left.1.variant_qualifier.is_empty(),
+                right.1.variant_qualifier.is_empty(),
+            ) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => left.1.variant_qualifier.cmp(&right.1.variant_qualifier),
+            }
+        });
+        entries
+    }
+
+    /// Layout variants for a binding class, with side-index URIs (default first).
+    pub(crate) fn layout_uris_for_binding_class(
+        &self,
+        class_name: &str,
+        module_root: &Path,
+    ) -> Vec<(String, Arc<LayoutFileData>)> {
+        let Some(layout_name) = layout_name_for_binding_class(class_name) else {
+            return Vec::new();
+        };
+        self.matching_layout_entries(module_root, &layout_name)
+    }
+
+    /// Every variant declaring `@+id/{id}` for the given layout name in `module_root`.
+    pub(crate) fn layouts_declaring_view_id(
+        &self,
+        module_root: &Path,
+        layout_name: &str,
+        id: &str,
+    ) -> Vec<(String, Range)> {
+        self.matching_layout_entries(module_root, layout_name)
+            .into_iter()
+            .filter_map(|(uri, data)| {
+                data.view_ids
+                    .iter()
+                    .find(|view_id| view_id.id == id)
+                    .map(|view_id| (uri, view_id.id_attribute_range))
+            })
+            .collect()
+    }
+
+    /// `<include>` tag ranges whose `android:id` maps to `field_name`.
+    pub(crate) fn include_tag_for_field(
+        &self,
+        module_root: &Path,
+        layout_name: &str,
+        field_name: &str,
+    ) -> Vec<(String, Range)> {
+        let id = binding_field_name_to_id(field_name);
+        self.matching_layout_entries(module_root, layout_name)
+            .into_iter()
+            .filter_map(|(uri, data)| {
+                data.includes
+                    .iter()
+                    .find(|include| include.id.as_deref() == Some(id.as_str()))
+                    .map(|include| (uri, include.tag_range))
+            })
+            .collect()
+    }
+
     /// True when `uri` is a discovered generated binding file (side-index membership).
-    #[allow(dead_code)] // PR 4 remap predicate
     pub(crate) fn is_generated_binding_uri(&self, uri: &str) -> bool {
         self.generated_bindings.iter().any(|module| {
             module

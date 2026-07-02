@@ -612,3 +612,89 @@ fn smoke_workspace_symbol() {
         "results must include 'OrderRepository'; got: {names:?}"
     );
 }
+
+/// ViewBinding: `textDocument/definition` on a binding type remaps to layout XML.
+#[test]
+fn smoke_viewbinding_definition_kotlin_to_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    write(root, "workspace.json", r#"{"sourcePaths":[]}"#);
+
+    write(
+        root,
+        "app/src/main/res/layout/foo_bar.xml",
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+</LinearLayout>
+"#,
+    );
+
+    write(
+        root,
+        "app/build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java",
+        r#"package com.example.app.databinding;
+
+import android.widget.TextView;
+
+public final class FooBarBinding {
+    public final TextView title;
+
+    private FooBarBinding(TextView title) {
+        this.title = title;
+    }
+}
+"#,
+    );
+
+    let usage_text = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        binding.title
+    }
+}
+"#;
+    write(
+        root,
+        "app/src/main/kotlin/com/example/MainActivity.kt",
+        usage_text,
+    );
+
+    let mut client = LspClient::spawn(root);
+    client.initialize(root);
+    client.wait_for_indexing();
+
+    let uri = file_uri(root, "app/src/main/kotlin/com/example/MainActivity.kt");
+    client.open_file(&uri, "kotlin", usage_text);
+
+    let resp = client.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {"uri": uri},
+            "position": pos(usage_text, 5, 22),
+        }),
+    );
+
+    let result = &resp["result"];
+    let target_uri = if result.is_array() {
+        result[0]["uri"].as_str().unwrap_or("").to_owned()
+    } else {
+        result["uri"].as_str().unwrap_or("").to_owned()
+    };
+
+    let expected_layout_uri = file_uri(root, "app/src/main/res/layout/foo_bar.xml");
+    assert!(
+        target_uri == expected_layout_uri,
+        "definition must remap FooBarBinding type to layout XML;\n  expected: {expected_layout_uri}\n  got:      {target_uri}\n  full:     {result}"
+    );
+}

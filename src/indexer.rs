@@ -20,6 +20,7 @@ pub(crate) use self::cst_folding::cst_folding_ranges;
 
 mod infer;
 pub(crate) mod resolution;
+pub(crate) use self::resolution::IndexRead;
 // Re-export pure helpers from submodules so existing callers within this file
 // and the inline test module (`use super::*`) continue to resolve them by name.
 #[cfg(test)]
@@ -69,9 +70,9 @@ pub(crate) use self::layout::{is_layout_xml_path, LayoutCacheEntry, LayoutFileDa
 
 mod binding_discovery;
 pub(crate) use self::binding_discovery::{
-    is_generated_binding_watcher_path, module_root_for_generated_file,
-    spawn_binding_discovery_worker, BindingDiscoveryHandle, DatabindingWatcherHandle,
-    DatabindingWatcherState, ModuleBindings, ModuleBindingsCacheEntry,
+    binding_field_name_to_id, is_generated_binding_watcher_path, layout_name_for_binding_class,
+    module_root_for_generated_file, spawn_binding_discovery_worker, BindingDiscoveryHandle,
+    DatabindingWatcherHandle, DatabindingWatcherState, ModuleBindings, ModuleBindingsCacheEntry,
 };
 
 mod scan;

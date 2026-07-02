@@ -10,6 +10,7 @@ use crate::backend::helpers::syntax_diagnostics;
 use crate::features::call_arg_diagnostics::call_arg_diagnostics;
 use crate::features::fill_when::when_diagnostics;
 use crate::features::nullable_call_diagnostics::nullable_dot_call_diagnostics;
+use crate::indexer::is_layout_xml_path;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::Indexer;
 
@@ -116,7 +117,7 @@ impl FileChangeHandler {
                     drop(permit);
                     return (None, text);
                 }
-                let data = indexer.index_content(&uri, &text);
+                let data = index_layout_or_source_content(&indexer, &uri, &text);
                 drop(permit);
                 (data, text)
             })
@@ -214,6 +215,22 @@ impl FileChangeHandler {
             handle.abort();
         }
         self.diagnostic_generation.remove(&key);
+    }
+}
+
+fn index_layout_or_source_content(
+    indexer: &Indexer,
+    uri: &Url,
+    content: &str,
+) -> Option<std::sync::Arc<crate::types::FileData>> {
+    if uri
+        .to_file_path()
+        .is_ok_and(|path| is_layout_xml_path(&path))
+    {
+        indexer.index_layout_content(uri, content);
+        None
+    } else {
+        indexer.index_content(uri, content)
     }
 }
 
