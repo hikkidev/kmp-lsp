@@ -70,8 +70,8 @@ pub(crate) use self::layout::{is_layout_xml_path, LayoutCacheEntry, LayoutFileDa
 mod binding_discovery;
 pub(crate) use self::binding_discovery::{
     is_generated_binding_watcher_path, module_root_for_generated_file,
-    spawn_binding_discovery_worker, BindingDiscoveryHandle, ModuleBindings,
-    ModuleBindingsCacheEntry,
+    spawn_binding_discovery_worker, BindingDiscoveryHandle, DatabindingWatcherHandle,
+    DatabindingWatcherState, ModuleBindings, ModuleBindingsCacheEntry,
 };
 
 mod scan;
@@ -315,6 +315,8 @@ pub(crate) struct Indexer {
     pub(crate) generated_bindings: DashMap<PathBuf, Arc<ModuleBindings>>,
     /// Handle for enqueueing background generated-binding discovery.
     pub(crate) binding_discovery: std::sync::RwLock<BindingDiscoveryHandle>,
+    /// Handle for registering module roots with the server-side databinding poll watcher.
+    pub(crate) databinding_watcher: std::sync::RwLock<DatabindingWatcherHandle>,
 }
 
 /// Cap on how many same-named definitions a receiver-less by-name inference lookup
@@ -579,6 +581,7 @@ impl Indexer {
             layouts: DashMap::new(),
             generated_bindings: DashMap::new(),
             binding_discovery: std::sync::RwLock::new(BindingDiscoveryHandle::noop()),
+            databinding_watcher: std::sync::RwLock::new(DatabindingWatcherHandle::noop()),
         }
     }
 

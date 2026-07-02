@@ -15,6 +15,7 @@ pub(crate) mod actions;
 pub(crate) mod capabilities;
 pub(crate) mod commands;
 pub(crate) mod cursor;
+pub(crate) mod databinding_watcher;
 pub(crate) mod format;
 pub(crate) mod git_watcher;
 pub(crate) mod handlers;
@@ -56,9 +57,7 @@ impl Backend {
         let handle =
             crate::indexer::enrich::spawn_enrichment_worker(Arc::clone(&indexer), client.clone());
         indexer.set_enrichment_handle(handle);
-        let binding_handle = crate::indexer::spawn_binding_discovery_worker(Arc::clone(
-            &indexer,
-        ));
+        let binding_handle = crate::indexer::spawn_binding_discovery_worker(Arc::clone(&indexer));
         indexer.set_binding_discovery_handle(binding_handle);
 
         Self {
@@ -138,6 +137,12 @@ impl LanguageServer for Backend {
                 self.client.clone(),
             );
         }
+
+        let watcher_handle = databinding_watcher::spawn_databinding_watcher(
+            Arc::clone(&self.indexer),
+            self.event_tx.clone(),
+        );
+        self.indexer.set_databinding_watcher_handle(watcher_handle);
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -245,8 +250,7 @@ impl LanguageServer for Backend {
 
             if crate::indexer::is_generated_binding_watcher_path(&path) {
                 if change.typ == FileChangeType::DELETED {
-                    if let Some(module_root) =
-                        crate::indexer::module_root_for_generated_file(&path)
+                    if let Some(module_root) = crate::indexer::module_root_for_generated_file(&path)
                     {
                         let indexer = Arc::clone(&self.indexer);
                         tokio::task::spawn(async move {
@@ -259,9 +263,7 @@ impl LanguageServer for Backend {
                     }
                     continue;
                 }
-                if let Some(module_root) =
-                    crate::indexer::module_root_for_generated_file(&path)
-                {
+                if let Some(module_root) = crate::indexer::module_root_for_generated_file(&path) {
                     self.indexer
                         .request_generated_binding_discovery(module_root);
                 }
