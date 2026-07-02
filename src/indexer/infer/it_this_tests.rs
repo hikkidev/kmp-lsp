@@ -849,7 +849,7 @@ fn apply_this_resolved_receiver() {
     // `obj.apply { this }` where obj type is known → Resolved("Foo")
     let src = "val obj: Foo = Foo()";
     let (u, idx) = indexed("/t.kt", src);
-    let ctx = super::classify_this_lambda_context("obj.apply ", &idx, &u);
+    let ctx = super::classify_this_lambda_context("obj.apply ", &idx, &u, None);
     let is_resolved_foo = matches!(&ctx, super::ThisLambdaCtx::Resolved(t) if t == "Foo");
     assert!(is_resolved_foo, "expected Resolved(Foo), got: {ctx:?}");
 }
@@ -859,7 +859,7 @@ fn apply_this_unresolved_receiver_returns_receiver_ctx() {
     // `unknown.apply { this }` — type of `unknown` not in index → Receiver (NOT NotReceiver)
     let u = uri("/t.kt");
     let deps = super::super::deps::TestDeps::new();
-    let ctx = super::classify_this_lambda_context("unknown.apply ", &deps, &u);
+    let ctx = super::classify_this_lambda_context("unknown.apply ", &deps, &u, None);
     assert!(
         matches!(ctx, super::ThisLambdaCtx::Receiver),
         "apply with unresolvable receiver should be Receiver, got: {ctx:?}"
@@ -871,7 +871,7 @@ fn foreach_lambda_is_not_receiver_ctx() {
     // `list.forEach { this }` — forEach is NOT a scope function → NotReceiver
     let u = uri("/t.kt");
     let deps = super::super::deps::TestDeps::new();
-    let ctx = super::classify_this_lambda_context("list.forEach ", &deps, &u);
+    let ctx = super::classify_this_lambda_context("list.forEach ", &deps, &u, None);
     assert!(
         matches!(ctx, super::ThisLambdaCtx::NotReceiver),
         "forEach should yield NotReceiver, got: {ctx:?}"
@@ -883,7 +883,7 @@ fn with_this_unresolved_receiver_returns_receiver_ctx() {
     // `with(expr) { this }` — type of expr not found → Receiver
     let u = uri("/t.kt");
     let deps = super::super::deps::TestDeps::new();
-    let ctx = super::classify_this_lambda_context("with(someExpr) ", &deps, &u);
+    let ctx = super::classify_this_lambda_context("with(someExpr) ", &deps, &u, None);
     assert!(
         matches!(ctx, super::ThisLambdaCtx::Receiver),
         "with() with unresolvable arg should be Receiver, got: {ctx:?}"

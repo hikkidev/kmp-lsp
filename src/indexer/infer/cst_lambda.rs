@@ -1,6 +1,6 @@
 //! CST-backed lambda context helpers.
 
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{Position, Url};
 
 use crate::indexer::{Indexer, NodeExt};
 use crate::queries::{KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
@@ -19,7 +19,7 @@ use super::it_this::IT_SCAN_BACK_LINES;
 use super::lambda::{lambda_type_nth_input, lambda_type_receiver, RECEIVER_THIS_FNS};
 use super::lambda_resolution::{ExtractedTypeKind, GenericParamSource, LambdaParamResolution};
 use super::receiver::{
-    fun_trailing_lambda_this_type, lambda_receiver_type_from_context,
+    fun_trailing_lambda_this_type, lambda_receiver_type_from_context_at,
     lambda_receiver_type_named_arg_ml, resolve_call_params,
 };
 use super::sig::{last_fun_param_type_str, nth_fun_param_type_str, strip_trailing_call_args};
@@ -113,6 +113,7 @@ pub(crate) fn classify_this_lambda_context(
     before_brace: &str,
     deps: &impl InferDeps,
     uri: &Url,
+    position: Option<Position>,
 ) -> ThisLambdaCtx {
     let trimmed = before_brace.trim_end();
     let callee_raw = strip_trailing_call_args(trimmed).replace("?.", ".");
@@ -131,7 +132,7 @@ pub(crate) fn classify_this_lambda_context(
             }
             // Known stdlib scope functions (`run`, `apply`).
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
-                if let Some(raw) = deps.find_var_type(receiver_var, uri) {
+                if let Some(raw) = lookup_variable_type(deps, receiver_var, uri, position) {
                     let base = raw.ident_prefix();
                     if !base.is_empty() {
                         return ThisLambdaCtx::Resolved(base);
@@ -152,7 +153,7 @@ pub(crate) fn classify_this_lambda_context(
     let trailing_fn = last_ident_in(callee);
     if trailing_fn == "with" {
         if let Some(recv_name) = extract_first_arg(trimmed) {
-            if let Some(raw) = deps.find_var_type(recv_name, uri) {
+            if let Some(raw) = lookup_variable_type(deps, recv_name, uri, position) {
                 let base = raw.ident_prefix();
                 if !base.is_empty() {
                     return ThisLambdaCtx::Resolved(base);
@@ -206,8 +207,9 @@ fn lambda_this_ctx(
     });
 
     if call_function_name.as_deref() == Some("with") {
+        let position = position_from_node(cur, doc);
         return call_expression
-            .and_then(|call| cst_with_receiver_ctx(call, &doc.bytes, idx, uri))
+            .and_then(|call| cst_with_receiver_ctx(call, &doc.bytes, idx, uri, position))
             .unwrap_or(ThisLambdaCtx::NotReceiver);
     }
 
@@ -257,7 +259,9 @@ fn lambda_this_ctx(
         ThisLambdaCtx::Resolved(resolved_type)
     } else {
         match lambda_before_brace_context(cur, doc) {
-            Some((before_brace, _)) => classify_this_lambda_context(&before_brace, idx, uri),
+            Some((before_brace, _)) => {
+                classify_this_lambda_context(&before_brace, idx, uri, position_from_node(cur, doc))
+            }
             None => ThisLambdaCtx::NotReceiver,
         }
     }
@@ -286,7 +290,12 @@ pub(crate) fn is_inside_receiver_lambda(
                 if !lambda.has_lambda_named_params(&doc.bytes) {
                     if let Some((before_brace, _)) = lambda_before_brace_context(lambda, &doc) {
                         if !matches!(
-                            classify_this_lambda_context(&before_brace, idx, uri),
+                            classify_this_lambda_context(
+                                &before_brace,
+                                idx,
+                                uri,
+                                position_from_node(lambda, &doc)
+                            ),
                             ThisLambdaCtx::NotReceiver
                         ) {
                             return true;
@@ -332,7 +341,7 @@ pub(crate) fn is_inside_receiver_lambda(
                             continue;
                         }
                         return !matches!(
-                            classify_this_lambda_context(before_brace, idx, uri),
+                            classify_this_lambda_context(before_brace, idx, uri, None),
                             ThisLambdaCtx::NotReceiver
                         );
                     }
@@ -415,9 +424,10 @@ fn cst_with_receiver_ctx(
     bytes: &[u8],
     deps: &impl InferDeps,
     uri: &Url,
+    position: Option<Position>,
 ) -> Option<ThisLambdaCtx> {
     let recv_name = call_expr.first_value_argument_text(bytes)?;
-    if let Some(raw) = deps.find_var_type(&recv_name, uri) {
+    if let Some(raw) = lookup_variable_type(deps, &recv_name, uri, position) {
         let base = raw.ident_prefix();
         if !base.is_empty() {
             return Some(ThisLambdaCtx::Resolved(base));
@@ -501,10 +511,25 @@ pub(super) fn cst_it_or_this_type(
                     .enclosing_call_expression()
                     .and_then(|call_expr| {
                         (call_expr.call_fn_name(&doc.bytes).as_deref() == Some("with"))
-                            .then(|| cst_with_receiver_ctx(call_expr, &doc.bytes, idx, uri))
+                            .then(|| {
+                                cst_with_receiver_ctx(
+                                    call_expr,
+                                    &doc.bytes,
+                                    idx,
+                                    uri,
+                                    position_from_node(cur, doc),
+                                )
+                            })
                             .flatten()
                     })
-                    .unwrap_or_else(|| classify_this_lambda_context(&before_brace, idx, uri));
+                    .unwrap_or_else(|| {
+                        classify_this_lambda_context(
+                            &before_brace,
+                            idx,
+                            uri,
+                            position_from_node(cur, doc),
+                        )
+                    });
                 match ctx {
                     ThisLambdaCtx::Resolved(t) => return Some(t),
                     // Receiver-lambda context but type not found: stop walking up.
@@ -526,13 +551,16 @@ pub(super) fn cst_it_or_this_type(
                 log::trace!("cst_it_or_this_type: CST resolver returned None, trying text fallback with before_brace={before_brace:?}");
                 // Text fallback for cases the CST resolver can't handle yet
                 // (function not indexed, no call_expression parent).
-                let result = lambda_receiver_type_from_context(&before_brace, idx, uri)
-                    .or_else(|| {
-                        lambda_receiver_type_named_arg_ml(&before_brace, 0, lines, ln, idx, uri)
-                    })
-                    .or_else(|| {
-                        cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0).into_option()
-                    });
+                let result = lambda_receiver_type_from_context_at(
+                    &before_brace,
+                    idx,
+                    uri,
+                    position_from_node(cur, doc),
+                )
+                .or_else(|| {
+                    lambda_receiver_type_named_arg_ml(&before_brace, 0, lines, ln, idx, uri)
+                })
+                .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0).into_option());
                 match result.as_deref() {
                     Some(t) if is_generic_param(t) => {
                         if let Some(concrete) =
@@ -885,8 +913,56 @@ fn receiver_aware_params(
     uri: &Url,
 ) -> Option<String> {
     let (fn_name, qualifier) = call_expr.call_fn_and_qualifier(bytes)?;
-    let recv_type = qualifier
-        .as_deref()
-        .and_then(|v| deps.find_var_type(v, uri));
+    let recv_type = qualifier.as_deref().and_then(|qualifier_name| {
+        receiver_position_for_call(call_expr, bytes)
+            .and_then(|position| deps.find_var_type_at(qualifier_name, uri, position))
+            .or_else(|| deps.find_var_type(qualifier_name, uri))
+    });
     resolve_call_params(&fn_name, recv_type.as_deref(), deps, uri)
+}
+
+fn lookup_variable_type(
+    deps: &impl InferDeps,
+    var_name: &str,
+    uri: &Url,
+    position: Option<Position>,
+) -> Option<String> {
+    position
+        .and_then(|position| deps.find_var_type_at(var_name, uri, position))
+        .or_else(|| deps.find_var_type(var_name, uri))
+}
+
+fn position_from_node(
+    node: tree_sitter::Node<'_>,
+    doc: &crate::indexer::live_tree::LiveDoc,
+) -> Option<Position> {
+    let start = node.start_position();
+    let line_start_offsets = crate::inlay_hints::line_starts(&doc.bytes);
+    let utf16_column = crate::inlay_hints::ts_byte_col_to_utf16(
+        &doc.bytes,
+        &line_start_offsets,
+        start.row,
+        start.column,
+    );
+    Some(Position::new(start.row as u32, utf16_column as u32))
+}
+
+fn receiver_position_for_call(call_expr: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<Position> {
+    use crate::queries::KIND_NAV_EXPR;
+
+    let callee = call_expr.child(0)?;
+    let receiver_node = if callee.kind() == KIND_NAV_EXPR {
+        callee.named_child(0)?
+    } else {
+        callee
+    };
+    let start = receiver_node.start_position();
+    let line_start_offsets = crate::inlay_hints::line_starts(bytes);
+    let utf16_column = crate::inlay_hints::ts_byte_col_to_utf16(
+        bytes,
+        &line_start_offsets,
+        start.row,
+        start.column,
+    );
+    Some(Position::new(start.row as u32, utf16_column as u32))
 }

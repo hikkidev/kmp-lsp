@@ -340,6 +340,9 @@ impl InferDeps for Indexer {
     fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String> {
         infer_variable_type_raw(self, var_name, uri)
     }
+    fn find_var_type_at(&self, var_name: &str, uri: &Url, position: Position) -> Option<String> {
+        self.variable_type_at(uri, var_name, position)
+    }
     fn find_field_type(&self, class_name: &str, field_name: &str) -> Option<String> {
         if let Some(type_name) = synthetic_enum_field(self, class_name, field_name) {
             return Some(type_name);

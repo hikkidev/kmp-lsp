@@ -690,11 +690,48 @@ pub(crate) fn resolve_expected_binding_class(
                 return binding_class_from_receiver_type(&receiver_type);
             }
         }
-        let receiver_type = infer_receiver_type_at(index, qualifier, uri, position)?;
+        let receiver_type = if qualifier == "it" || qualifier == "this" {
+            infer_receiver_type(
+                index,
+                ReceiverKind::Contextual {
+                    name: qualifier,
+                    position,
+                },
+                uri,
+            )?
+        } else {
+            infer_receiver_type_at(index, qualifier, uri, position)?
+        };
         return binding_class_from_receiver_type(&receiver_type);
     }
 
-    None
+    binding_class_for_bare_field_at(index, uri, position, &ctx.word)
+}
+
+fn binding_class_for_bare_field_at(
+    index: &Indexer,
+    uri: &Url,
+    position: Position,
+    field_name: &str,
+) -> Option<String> {
+    let (tree, bytes) = live_or_disk_tree(index, uri)?;
+    let line_text = index
+        .mem_lines_for(uri.as_str())?
+        .get(position.line as usize)?
+        .clone();
+    let byte_column =
+        crate::indexer::live_tree::utf16_col_to_byte(&line_text, position.character as usize);
+    let target_point = tree_sitter::Point {
+        row: position.line as usize,
+        column: byte_column,
+    };
+    let identifier_node = tree
+        .root_node()
+        .descendant_for_point_range(target_point, target_point)?;
+    if identifier_node.kind() != KIND_SIMPLE_IDENT {
+        return None;
+    }
+    binding_class_for_bare_field_access(index, &identifier_node, field_name, &bytes, uri)
 }
 
 fn binding_class_from_file_uri(index: &Indexer, uri: &Url) -> Option<String> {
@@ -723,7 +760,18 @@ fn binding_class_for_receiver_chain(
     if segments.is_empty() {
         return None;
     }
-    let root_type = infer_receiver_type_at(index, segments[0], uri, position)?;
+    let root_type = if segments[0] == "it" || segments[0] == "this" {
+        infer_receiver_type(
+            index,
+            ReceiverKind::Contextual {
+                name: segments[0],
+                position,
+            },
+            uri,
+        )?
+    } else {
+        infer_receiver_type_at(index, segments[0], uri, position)?
+    };
     let mut binding_class = binding_class_from_receiver_type(&root_type)?;
     for field in &segments[1..] {
         let field_type = java_binding_field_type(index, uri, &binding_class, field)?;

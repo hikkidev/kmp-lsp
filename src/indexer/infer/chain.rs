@@ -354,7 +354,20 @@ pub(super) fn resolve_root_node_type(
     match node.kind() {
         k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
             let name = node.utf8_text_owned(bytes)?;
-            if let Some(raw) = deps.find_var_type(&name, uri) {
+            let start = node.start_position();
+            let line_start_offsets = crate::inlay_hints::line_starts(bytes);
+            let utf16_column = crate::inlay_hints::ts_byte_col_to_utf16(
+                bytes,
+                &line_start_offsets,
+                start.row,
+                start.column,
+            );
+            let position =
+                tower_lsp::lsp_types::Position::new(start.row as u32, utf16_column as u32);
+            if let Some(raw) = deps
+                .find_var_type_at(&name, uri, position)
+                .or_else(|| deps.find_var_type(&name, uri))
+            {
                 // Validate it is a type name (starts with uppercase, not a generic
                 // placeholder like `T`), then return the FULL raw string including
                 // generics so that downstream `build_type_arg_subst` can extract

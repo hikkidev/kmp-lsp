@@ -243,7 +243,9 @@ pub(crate) fn infer_receiver_type_at(
             return Some(ReceiverType::from_raw(narrowed));
         }
     }
-    // Fallback to normal inference
+    if let Some(raw) = indexer.variable_type_at(uri, name, position) {
+        return Some(ReceiverType::from_raw(raw));
+    }
     infer_receiver_type(indexer, ReceiverKind::Variable(name), uri)
 }
 

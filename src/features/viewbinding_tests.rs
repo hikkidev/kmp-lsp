@@ -1508,3 +1508,201 @@ class Decoy {
         "decoy bare `avatar` usages must not appear in binding-field references"
     );
 }
+
+/// Competing `binding` declarations in one class: a class property plus two
+/// methods each taking a different `*Binding` parameter. File-global name lookup
+/// returns the first `binding:` annotation — the wrong class for receiver-scoped
+/// access inside the other methods.
+struct CompetingBindingFixture {
+    _temp: tempfile::TempDir,
+    kotlin_uri: Url,
+    kotlin_source: String,
+    indexer: Arc<Indexer>,
+}
+
+impl CompetingBindingFixture {
+    fn build() -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let module_root = temp.path().join("app");
+        let layout_dir = module_root.join("src/main/res/layout");
+        fs::create_dir_all(&layout_dir).expect("mkdir layout");
+
+        let default_layout_path = layout_dir.join("foo_bar.xml");
+        let header_layout_path = layout_dir.join("view_header.xml");
+        let profile_layout_path = layout_dir.join("profile.xml");
+        fs::write(&default_layout_path, FOO_BAR_LAYOUT).expect("write default layout");
+        fs::write(&header_layout_path, VIEW_HEADER_LAYOUT).expect("write header layout");
+        fs::write(&profile_layout_path, AVATAR_LAYOUT).expect("write profile layout");
+
+        let binding_java_path = module_root.join(
+            "build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java",
+        );
+        let header_binding_path = module_root.join(
+            "build/generated/source/databinding/com/example/app/databinding/ViewHeaderBinding.java",
+        );
+        let profile_binding_path = module_root.join(
+            "build/generated/source/databinding/com/example/app/databinding/ProfileBinding.java",
+        );
+        fs::create_dir_all(binding_java_path.parent().unwrap()).expect("mkdir binding");
+        fs::write(&binding_java_path, FOO_BAR_BINDING_JAVA).expect("write binding java");
+        fs::write(&header_binding_path, VIEW_HEADER_BINDING_JAVA).expect("write header binding");
+        fs::write(&profile_binding_path, AVATAR_BINDING_JAVA).expect("write profile binding");
+
+        let kotlin_path = module_root.join("src/main/kotlin/com/example/CompetingBindings.kt");
+        fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir competing");
+        let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+import com.example.app.databinding.ProfileBinding
+import com.example.app.databinding.ViewHeaderBinding
+
+class Delegate {
+    private val binding: ViewHeaderBinding? = null
+
+    fun bar(binding: FooBarBinding) {
+        binding.title.toString()
+        with(binding) {
+            title.toString()
+        }
+        binding.apply {
+            title.toString()
+        }
+        binding.let {
+            it.title.toString()
+        }
+    }
+
+    fun other(binding: ProfileBinding) {
+        with(binding) {
+            avatar.toString()
+        }
+    }
+}
+"#;
+        fs::write(&kotlin_path, kotlin_source).expect("write competing");
+
+        let indexer = Arc::new(Indexer::new());
+        indexer.workspace_root.set(temp.path().to_path_buf());
+
+        let default_layout_uri = Url::from_file_path(&default_layout_path).expect("default uri");
+        let header_layout_uri = Url::from_file_path(&header_layout_path).expect("header uri");
+        let profile_layout_uri = Url::from_file_path(&profile_layout_path).expect("profile uri");
+        let kotlin_uri = Url::from_file_path(&kotlin_path).expect("competing uri");
+
+        indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
+        indexer.index_layout_content(&header_layout_uri, VIEW_HEADER_LAYOUT);
+        indexer.index_layout_content(&profile_layout_uri, AVATAR_LAYOUT);
+        indexer.index_generated_bindings(&module_root);
+        indexer.index_content(&kotlin_uri, kotlin_source);
+        indexer.set_live_lines(&kotlin_uri, kotlin_source);
+        indexer.store_live_tree(&kotlin_uri, kotlin_source);
+
+        Self {
+            _temp: temp,
+            kotlin_uri,
+            kotlin_source: kotlin_source.to_string(),
+            indexer,
+        }
+    }
+
+    fn assert_resolves_to_foo_bar(&self, line_needle: &str, word: &str, qualifier: Option<&str>) {
+        let position =
+            ViewBindingFixture::position_on_word_in_line(&self.kotlin_source, line_needle, word);
+        let context = if let Some(qualifier_name) = qualifier {
+            ViewBindingFixture::cursor_context(word, Some(qualifier_name))
+        } else {
+            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context")
+        };
+        let expected_class = resolve_expected_binding_class(
+            &self.indexer,
+            &self.kotlin_uri,
+            position,
+            &context,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "resolve_expected_binding_class returned None for {line_needle:?} word={word:?} qualifier={qualifier:?} contextual={:?}",
+                context.contextual.as_ref().map(|receiver| receiver.leaf.as_str())
+            )
+        });
+        assert_eq!(
+            expected_class, "FooBarBinding",
+            "wrong binding class for {line_needle:?} word={word:?}"
+        );
+    }
+
+    async fn assert_definition_in_foo_bar(&self, line_needle: &str, word: &str) {
+        let position =
+            ViewBindingFixture::position_on_word_in_line(&self.kotlin_source, line_needle, word);
+        let context =
+            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context");
+        let response = find_definition(&context, &*self.indexer, &self.kotlin_uri, position)
+            .await
+            .expect("definition for {line_needle}");
+        let locations = response_locations(Some(response));
+        assert!(
+            !locations.is_empty(),
+            "expected layout remap for {line_needle}, got empty"
+        );
+        assert!(
+            locations
+                .iter()
+                .all(|location| uri_path_string(location) == "foo_bar.xml"),
+            "expected foo_bar.xml for {line_needle}, got {locations:?}"
+        );
+    }
+}
+
+#[test]
+fn resolve_expected_binding_class_scoped_to_enclosing_method_parameter() {
+    let fixture = CompetingBindingFixture::build();
+    fixture.assert_resolves_to_foo_bar("binding.title.toString()", "title", Some("binding"));
+    fixture.assert_resolves_to_foo_bar(
+        "with(binding) {\n            title.toString()",
+        "title",
+        None,
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "binding.apply {\n            title.toString()",
+        "title",
+        None,
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "binding.let {\n            it.title.toString()",
+        "title",
+        Some("it"),
+    );
+}
+
+#[tokio::test]
+async fn receiver_scoped_binding_field_definition_resolves_to_correct_layout() {
+    let fixture = CompetingBindingFixture::build();
+    fixture
+        .assert_definition_in_foo_bar("binding.title.toString()", "title")
+        .await;
+    fixture
+        .assert_definition_in_foo_bar("with(binding) {\n            title.toString()", "title")
+        .await;
+    fixture
+        .assert_definition_in_foo_bar("binding.apply {\n            title.toString()", "title")
+        .await;
+    fixture
+        .assert_definition_in_foo_bar("binding.let {\n            it.title.toString()", "title")
+        .await;
+}
+
+#[test]
+fn resolve_expected_binding_class_other_method_uses_profile_binding() {
+    let fixture = CompetingBindingFixture::build();
+    let position = ViewBindingFixture::position_on_word_in_line(
+        &fixture.kotlin_source,
+        "with(binding) {\n            avatar.toString()",
+        "avatar",
+    );
+    let context =
+        CursorContext::build(&fixture.indexer, &fixture.kotlin_uri, position).expect("context");
+    let expected_class =
+        resolve_expected_binding_class(&fixture.indexer, &fixture.kotlin_uri, position, &context)
+            .expect("expected ProfileBinding for other()");
+    assert_eq!(expected_class, "ProfileBinding");
+}
