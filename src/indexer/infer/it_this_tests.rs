@@ -1915,6 +1915,7 @@ fn insert_fake_jar_symbol(
         doc: String::new(),
         trailing_lambda: false,
         deprecated: false,
+        nullable: false,
     };
     idx.jar_files.insert(
         fake_uri_str.clone(),

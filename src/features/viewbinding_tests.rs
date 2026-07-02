@@ -8,14 +8,17 @@ use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Url};
 
 use crate::backend::cursor::CursorContext;
 use crate::features::definition::find_definition;
+use crate::features::hover::compute_hover;
 use crate::features::implementation::find_implementation;
 use crate::features::traits::SymbolIndex;
 use crate::features::viewbinding::{
-    find_binding_implementation, find_layout_xml_definition, find_layout_xml_implementation,
-    remap_generated_binding_definitions,
+    binding_field_hover_for_class, find_binding_field_references, find_binding_implementation,
+    find_layout_xml_definition, find_layout_xml_implementation, find_layout_xml_references,
+    format_binding_field_hover, java_field_type_from_detail, remap_generated_binding_definitions,
+    resolve_expected_binding_class, short_type_name,
 };
-use crate::indexer::binding_field_name_to_id;
-use crate::indexer::Indexer;
+use crate::indexer::{binding_field_name_to_id, binding_id_to_field_name, Indexer};
+use crate::parser::nullable_at_line;
 
 const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -66,10 +69,12 @@ const FOO_BAR_BINDING_JAVA: &str = r#"package com.example.app.databinding;
 
 import android.view.View;
 import android.widget.TextView;
+import androidx.annotation.Nullable;
 import androidx.constraintlayout.widget.ConstraintLayout;
 
 public final class FooBarBinding {
     public final TextView title;
+    @Nullable
     public final TextView subtitle;
     public final ViewHeaderBinding header;
     private final ConstraintLayout rootView;
@@ -233,8 +238,222 @@ fn uri_path_string(location: &Location) -> String {
 #[test]
 fn binding_field_name_to_id_inverts_layout_id_mapping() {
     assert_eq!(binding_field_name_to_id("fooBar"), "foo_bar");
+    assert_eq!(binding_id_to_field_name("foo_bar"), "fooBar");
     assert_eq!(binding_field_name_to_id("title"), "title");
+    assert_eq!(binding_id_to_field_name("title"), "title");
     assert_eq!(binding_field_name_to_id("header"), "header");
+}
+
+#[test]
+fn short_type_name_strips_package_prefix() {
+    assert_eq!(short_type_name("android.widget.TextView"), "TextView");
+    assert_eq!(short_type_name("ViewHeaderBinding"), "ViewHeaderBinding");
+}
+
+#[test]
+fn format_binding_field_hover_renders_nullable_and_non_nullable() {
+    let non_null = format_binding_field_hover("title", "android.widget.TextView", false);
+    assert!(non_null.contains("val title: TextView"));
+    assert!(!non_null.contains("android.widget"));
+    let nullable = format_binding_field_hover("subtitle", "TextView", true);
+    assert!(nullable.contains("val subtitle: TextView?"));
+}
+
+#[test]
+fn java_field_type_from_detail_extracts_type() {
+    assert_eq!(
+        java_field_type_from_detail("public final TextView title", "title"),
+        Some("TextView".to_string())
+    );
+    assert_eq!(
+        java_field_type_from_detail("public final ViewHeaderBinding header", "header"),
+        Some("ViewHeaderBinding".to_string())
+    );
+}
+
+#[test]
+fn nullable_at_line_detects_annotation_above_field() {
+    let lines = vec![
+        "import androidx.annotation.Nullable;".to_string(),
+        "@Nullable".to_string(),
+        "public final TextView subtitle;".to_string(),
+    ];
+    assert!(nullable_at_line(&lines, 2));
+    assert!(!nullable_at_line(
+        &["public final TextView title;".to_string()],
+        0
+    ));
+}
+
+#[tokio::test]
+async fn hover_on_binding_field_renders_kotlin_style() {
+    let fixture = ViewBindingFixture::build();
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
+    let context = ViewBindingFixture::cursor_context("title", Some("binding"));
+    let hover = compute_hover(
+        fixture.indexer.as_ref(),
+        &context,
+        &fixture.kotlin_uri,
+        position,
+    )
+    .expect("hover");
+    let markdown = match hover.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(content) => content.value,
+        _ => panic!("expected markdown hover"),
+    };
+    assert!(markdown.contains("val title: TextView"));
+    assert!(!markdown.contains("android.widget"));
+}
+
+#[tokio::test]
+async fn hover_on_nullable_binding_field_shows_question_mark() {
+    let fixture = ViewBindingFixture::build();
+    let kotlin_source = fixture.kotlin_source.replace(
+        "binding.title",
+        "binding.subtitle",
+    );
+    fixture
+        .indexer
+        .index_content(&fixture.kotlin_uri, &kotlin_source);
+    fixture
+        .indexer
+        .set_live_lines(&fixture.kotlin_uri, &kotlin_source);
+    fixture
+        .indexer
+        .store_live_tree(&fixture.kotlin_uri, &kotlin_source);
+
+    let position = ViewBindingFixture::position_in(&kotlin_source, "binding.subtitle");
+    let context = ViewBindingFixture::cursor_context("subtitle", Some("binding"));
+    let hover = compute_hover(
+        fixture.indexer.as_ref(),
+        &context,
+        &fixture.kotlin_uri,
+        position,
+    )
+    .expect("hover");
+    let markdown = match hover.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(content) => content.value,
+        _ => panic!("expected markdown hover"),
+    };
+    assert!(markdown.contains("val subtitle: TextView?"));
+}
+
+#[test]
+fn binding_field_hover_for_class_reads_nullable_flag() {
+    let fixture = ViewBindingFixture::build();
+    let hover = binding_field_hover_for_class(&fixture.indexer, "FooBarBinding", "subtitle")
+        .expect("binding hover");
+    assert!(hover.contains("TextView?"));
+}
+
+#[tokio::test]
+async fn binding_field_references_find_qualified_usages() {
+    let fixture = ViewBindingFixture::build();
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
+    let context = ViewBindingFixture::cursor_context("title", Some("binding"));
+    let expected = resolve_expected_binding_class(
+        &fixture.indexer,
+        &fixture.kotlin_uri,
+        position,
+        &context,
+    )
+    .expect("expected binding class");
+    assert_eq!(expected, "FooBarBinding");
+
+    let references = find_binding_field_references(
+        &fixture.indexer,
+        &expected,
+        "title",
+        &fixture.kotlin_uri,
+        position.line,
+        false,
+    )
+    .await;
+    assert!(!references.is_empty());
+    assert!(references
+        .iter()
+        .all(|location| !fixture.indexer.is_generated_binding_uri(location.uri.as_str())));
+}
+
+#[tokio::test]
+async fn binding_field_references_exclude_misleading_competitor() {
+    let fixture = ViewBindingFixture::build();
+    let competitor_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/Competitor.kt");
+    fs::create_dir_all(competitor_path.parent().unwrap()).expect("mkdir");
+    let competitor_source = r#"package com.example
+
+class Competitor {
+    val title: String = "misleading"
+}
+
+fun use(competitor: Competitor) {
+    competitor.title
+}
+"#;
+    fs::write(&competitor_path, competitor_source).expect("write competitor");
+    let competitor_uri = Url::from_file_path(&competitor_path).expect("competitor uri");
+    fixture.indexer.index_content(&competitor_uri, competitor_source);
+
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
+    let references = find_binding_field_references(
+        &fixture.indexer,
+        "FooBarBinding",
+        "title",
+        &fixture.kotlin_uri,
+        position.line,
+        false,
+    )
+    .await;
+    assert!(references
+        .iter()
+        .all(|location| !location.uri.as_str().contains("Competitor.kt")));
+}
+
+#[tokio::test]
+async fn xml_references_match_kotlin_side() {
+    let fixture = ViewBindingFixture::build();
+    let default_layout_uri = fixture
+        .indexer
+        .layout_uris_for_binding_class("FooBarBinding", &fixture.module_root)
+        .into_iter()
+        .find(|(_uri, data)| data.variant_qualifier.is_empty())
+        .map(|(uri, _data)| Url::parse(&uri).expect("layout uri"))
+        .expect("default layout uri");
+
+    let xml_position = ViewBindingFixture::position_in(FOO_BAR_LAYOUT, "@+id/title");
+    let xml_refs = find_layout_xml_references(
+        &fixture.indexer,
+        &default_layout_uri,
+        xml_position,
+        false,
+    )
+    .await
+    .expect("xml references");
+
+    let kotlin_position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
+    let kotlin_refs = find_binding_field_references(
+        &fixture.indexer,
+        "FooBarBinding",
+        "title",
+        &fixture.kotlin_uri,
+        kotlin_position.line,
+        false,
+    )
+    .await;
+
+    let mut xml_set: Vec<_> = xml_refs
+        .iter()
+        .map(|location| (location.uri.as_str(), location.range.start.line))
+        .collect();
+    let mut kotlin_set: Vec<_> = kotlin_refs
+        .iter()
+        .map(|location| (location.uri.as_str(), location.range.start.line))
+        .collect();
+    xml_set.sort();
+    kotlin_set.sort();
+    assert_eq!(xml_set, kotlin_set);
 }
 
 #[tokio::test]

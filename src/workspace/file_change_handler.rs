@@ -10,6 +10,9 @@ use crate::backend::helpers::syntax_diagnostics;
 use crate::features::call_arg_diagnostics::call_arg_diagnostics;
 use crate::features::fill_when::when_diagnostics;
 use crate::features::nullable_call_diagnostics::nullable_dot_call_diagnostics;
+use crate::features::viewbinding_diagnostics::{
+    stale_binding_field_diagnostics, viewbinding_import_diagnostics,
+};
 use crate::indexer::is_layout_xml_path;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::Indexer;
@@ -181,12 +184,14 @@ impl FileChangeHandler {
                         );
                         diagnostics.extend(arg_diags);
                         diagnostics.extend(nullable_dot_call_diagnostics(&indexer, &uri, doc));
+                        diagnostics.extend(stale_binding_field_diagnostics(&indexer, &uri, doc));
                     } else {
                         log::debug!(
                             "diag[gen={}]: live_doc is None — no call-arg diagnostics",
                             my_generation,
                         );
                     }
+                    diagnostics.extend(viewbinding_import_diagnostics(&indexer, &uri));
                     diagnostics
                 }
             })

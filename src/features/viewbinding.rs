@@ -1,24 +1,33 @@
-//! ViewBinding navigation — post-resolution remap and XML-side helpers (PR 4).
+//! ViewBinding navigation — post-resolution remap, hover, references (PR 4–5).
 
 use std::cell::RefCell;
 use std::path::Path;
 
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, SymbolKind, Url};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::backend::cursor::CursorContext;
+use crate::backend::format::format_contextual_hover;
 use crate::features::definition::locs_to_opt_response;
+use crate::features::references::find_references_with_qualifier;
 use crate::features::traits::{DocumentAccess, SymbolIndex};
+use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::NodeExt;
 use crate::indexer::{
-    binding_field_name_to_id, is_layout_xml_path, layout_name_for_binding_class,
-    module_root_for_generated_file, IndexRead,
+    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
+    is_layout_xml_path, layout_name_for_binding_class, module_root_for_generated_file, IndexRead,
+    Indexer,
 };
 use crate::queries::{
-    KIND_XML_ATT_VALUE, KIND_XML_DOCUMENT, KIND_XML_ELEMENT, KIND_XML_EMPTY_ELEM_TAG,
-    KIND_XML_NAME, KIND_XML_STAG,
+    KIND_NAV_EXPR, KIND_SIMPLE_IDENT, KIND_XML_ATT_VALUE, KIND_XML_DOCUMENT, KIND_XML_ELEMENT,
+    KIND_XML_EMPTY_ELEM_TAG, KIND_XML_NAME, KIND_XML_STAG,
+};
+use crate::resolver::{
+    infer::infer_field_chain_type, infer_receiver_type, infer_receiver_type_at, ReceiverKind,
+    ReceiverType,
 };
 use crate::types::{FileData, SymbolEntry};
+use crate::StrExt;
 
 const ANDROID_TAG_PREFIXES: &[&str] = &["android.widget.", "android.view.", "android.webkit."];
 
@@ -393,6 +402,416 @@ fn strip_xml_quotes(value: &str) -> &str {
     } else {
         value
     }
+}
+
+// ─── Binding-field hover (PR 5) ──────────────────────────────────────────────
+
+/// Strip package prefix from a type name (`android.widget.TextView` → `TextView`).
+pub(crate) fn short_type_name(type_name: &str) -> String {
+    type_name
+        .trim()
+        .rsplit('.')
+        .next()
+        .unwrap_or(type_name)
+        .to_string()
+}
+
+/// Kotlin-style hover for a generated binding field: `val title: TextView` / `val title: TextView?`.
+pub(crate) fn format_binding_field_hover(
+    field_name: &str,
+    type_name: &str,
+    nullable: bool,
+) -> String {
+    let short = short_type_name(type_name);
+    let rendered_type = if nullable {
+        format!("{short}?")
+    } else {
+        short
+    };
+    let signature = format!("val {field_name}: {rendered_type}");
+    format_contextual_hover(&signature, ".kt", None)
+}
+
+/// Extract the Java field type from a `SymbolEntry.detail` string.
+pub(crate) fn java_field_type_from_detail(detail: &str, field_name: &str) -> Option<String> {
+    const MODIFIERS: &[&str] = &["public", "private", "protected", "final", "static"];
+    let without_name = detail
+        .trim()
+        .trim_end_matches(';')
+        .strip_suffix(field_name)?
+        .trim();
+    let type_tokens: Vec<&str> = without_name
+        .split_whitespace()
+        .filter(|token| {
+            !MODIFIERS.contains(token) && !token.starts_with('@') && !token.ends_with(';')
+        })
+        .collect();
+    type_tokens.last().map(|token| token.to_string())
+}
+
+/// Kotlin-style hover for a field on a known generated binding class.
+pub(crate) fn binding_field_hover_for_class(
+    index: &Indexer,
+    class_name: &str,
+    field_name: &str,
+) -> Option<String> {
+    for module in index.generated_bindings.iter() {
+        let Some(entry) = module.value().entries.get(class_name) else {
+            continue;
+        };
+        let file_data = index.file_data_for(&entry.file_uri)?;
+        let symbol = file_data.symbols.iter().find(|symbol| {
+            symbol.name == field_name
+                && matches!(
+                    symbol.kind,
+                    SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+                )
+        })?;
+        let type_name = java_field_type_from_detail(&symbol.detail, field_name)?;
+        return Some(format_binding_field_hover(
+            field_name,
+            &type_name,
+            symbol.nullable,
+        ));
+    }
+    None
+}
+
+/// When `location` is a generated binding field, return Kotlin-style hover markdown.
+pub(crate) fn binding_field_hover_at_location<I: IndexRead>(
+    index: &I,
+    location: &Location,
+    field_name: &str,
+) -> Option<String> {
+    if !index.is_generated_binding_uri(location.uri.as_str()) {
+        return None;
+    }
+    let file_data = index.get_file_data(location.uri.as_str())?;
+    let symbol = file_data
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.name == field_name
+                && matches!(
+                    symbol.kind,
+                    SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+                )
+        })
+        .or_else(|| symbol_at_location(&file_data, location))?;
+    if symbol.name != field_name {
+        return None;
+    }
+    if !matches!(
+        symbol.kind,
+        SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+    ) {
+        return None;
+    }
+    let type_name = java_field_type_from_detail(&symbol.detail, field_name)?;
+    Some(format_binding_field_hover(
+        field_name,
+        &type_name,
+        symbol.nullable,
+    ))
+}
+
+// ─── Receiver-verified references (PR 5) ─────────────────────────────────────
+
+/// Resolve the expected `*Binding` class for a references request at `position`.
+pub(crate) fn resolve_expected_binding_class(
+    index: &Indexer,
+    uri: &Url,
+    position: Position,
+    ctx: &CursorContext,
+) -> Option<String> {
+    if index.is_generated_binding_uri(uri.as_str()) {
+        if !ctx.word.starts_with_uppercase() {
+            return binding_class_from_file_uri(index, uri);
+        }
+        return None;
+    }
+
+    if let Some(receiver_type) = ctx.contextual.as_ref() {
+        if let Some(class_name) = binding_class_from_receiver_type(receiver_type) {
+            return Some(class_name);
+        }
+    }
+
+    if let Some(qualifier) = ctx.qualifier.as_deref() {
+        let receiver_type = infer_receiver_type_at(index, qualifier, uri, position)?;
+        return binding_class_from_receiver_type(&receiver_type);
+    }
+
+    None
+}
+
+fn binding_class_from_file_uri(index: &Indexer, uri: &Url) -> Option<String> {
+    let file_data = index.get_file_data(uri.as_str())?;
+    binding_class_from_file_data(&file_data)
+}
+
+fn binding_class_from_receiver_type(receiver_type: &ReceiverType) -> Option<String> {
+    if receiver_type.leaf.ends_with("Binding") {
+        return Some(receiver_type.leaf.clone());
+    }
+    if receiver_type.qualified.ends_with("Binding") {
+        return Some(receiver_type.leaf.clone());
+    }
+    None
+}
+
+fn receiver_matches_binding_class(
+    receiver_type: &ReceiverType,
+    expected_binding_class: &str,
+) -> bool {
+    receiver_type.leaf == expected_binding_class
+        || receiver_type.qualified == expected_binding_class
+        || receiver_type.qualified.ends_with(&format!(".{expected_binding_class}"))
+}
+
+/// Find Kotlin usages of a binding field, verified by receiver type.
+pub(crate) async fn find_binding_field_references(
+    index: &Indexer,
+    expected_binding_class: &str,
+    field_name: &str,
+    uri: &Url,
+    line: u32,
+    include_decl: bool,
+) -> Vec<Location> {
+    let candidates = find_references_with_qualifier(
+        field_name,
+        None,
+        uri,
+        line,
+        include_decl,
+        index,
+    )
+    .await;
+
+    candidates
+        .into_iter()
+        .filter(|location| !index.is_generated_binding_uri(location.uri.as_str()))
+        .filter(|location| {
+            verify_binding_field_reference(index, location, field_name, expected_binding_class)
+        })
+        .collect()
+}
+
+fn verify_binding_field_reference(
+    index: &Indexer,
+    location: &Location,
+    field_name: &str,
+    expected_binding_class: &str,
+) -> bool {
+    let Some((tree, bytes)) = live_or_disk_tree(index, &location.uri) else {
+        return false;
+    };
+    let Some(navigation_node) =
+        navigation_expression_at_position(&tree, &bytes, location.range.start, field_name)
+    else {
+        return false;
+    };
+    let Some(receiver_type) =
+        infer_receiver_for_navigation(index, &navigation_node, &bytes, &location.uri)
+    else {
+        return false;
+    };
+    receiver_matches_binding_class(&receiver_type, expected_binding_class)
+}
+
+fn live_or_disk_tree(index: &Indexer, uri: &Url) -> Option<(Tree, Vec<u8>)> {
+    if let Some(document) = index.live_doc(uri) {
+        return Some((document.tree.clone(), document.bytes.clone()));
+    }
+    let path = uri.to_file_path().ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let language = lang_for_path(uri.path())?;
+    let document = parse_live(&content, language)?;
+    Some((document.tree, document.bytes))
+}
+
+fn navigation_expression_at_position<'tree>(
+    tree: &'tree Tree,
+    bytes: &[u8],
+    position: Position,
+    field_name: &str,
+) -> Option<Node<'tree>> {
+    let root = tree.root_node();
+    let target_point = tree_sitter::Point {
+        row: position.line as usize,
+        column: position.character as usize,
+    };
+    let mut node = root.descendant_for_point_range(target_point, target_point)?;
+    loop {
+        if node.kind() == KIND_NAV_EXPR
+            && navigation_member_name(&node, bytes)?.as_str() == field_name
+        {
+            return Some(node);
+        }
+        node = node.parent()?;
+    }
+}
+
+fn navigation_member_name(navigation_node: &Node<'_>, bytes: &[u8]) -> Option<String> {
+    let named_count = navigation_node.named_child_count();
+    if named_count < 2 {
+        return None;
+    }
+    let suffix_node = navigation_node.named_child(named_count - 1)?;
+    suffix_node
+        .first_child_of_kind(KIND_SIMPLE_IDENT)?
+        .utf8_text_owned(bytes)
+}
+
+fn infer_receiver_for_navigation(
+    index: &Indexer,
+    navigation_node: &Node<'_>,
+    bytes: &[u8],
+    uri: &Url,
+) -> Option<ReceiverType> {
+    let named_count = navigation_node.named_child_count();
+    if named_count < 2 {
+        return None;
+    }
+    let receiver_node = navigation_node.named_child(0)?;
+    let suffix_node = navigation_node.named_child(named_count - 1)?;
+    let operator = suffix_node.child(0)?;
+    if operator.kind() != "." {
+        return None;
+    }
+    infer_receiver_type_for_node(index, &receiver_node, bytes, uri)
+}
+
+fn infer_receiver_type_for_node(
+    index: &Indexer,
+    receiver_node: &Node<'_>,
+    bytes: &[u8],
+    uri: &Url,
+) -> Option<ReceiverType> {
+    match receiver_node.kind() {
+        KIND_SIMPLE_IDENT => {
+            let name = receiver_node.utf8_text_owned(bytes)?;
+            if name == "this" || name == "super" {
+                return None;
+            }
+            infer_receiver_type(index, ReceiverKind::Variable(&name), uri)
+        }
+        KIND_NAV_EXPR => {
+            let chain = pure_field_chain(receiver_node, bytes)?;
+            if chain.len() < 2 || chain[0] == "this" || chain[0] == "super" {
+                return None;
+            }
+            infer_field_chain_type(index, &chain, uri)
+        }
+        _ => None,
+    }
+}
+
+fn pure_field_chain(receiver_node: &Node<'_>, bytes: &[u8]) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = *receiver_node;
+    loop {
+        if current.kind() == KIND_SIMPLE_IDENT {
+            segments.insert(0, current.utf8_text_owned(bytes)?);
+            break;
+        }
+        if current.kind() != KIND_NAV_EXPR {
+            return None;
+        }
+        let named_count = current.named_child_count();
+        if named_count < 2 {
+            return None;
+        }
+        let suffix_node = current.named_child(named_count - 1)?;
+        if suffix_node.child(0)?.kind() != "." {
+            return None;
+        }
+        let member = suffix_node.first_child_of_kind(KIND_SIMPLE_IDENT)?;
+        segments.insert(0, member.utf8_text_owned(bytes)?);
+        current = current.named_child(0)?;
+    }
+    Some(segments)
+}
+
+/// References from `@+id/field` in a layout XML file.
+pub(crate) async fn find_layout_xml_references(
+    index: &Indexer,
+    uri: &Url,
+    position: Position,
+    include_decl: bool,
+) -> Option<Vec<Location>> {
+    let path = uri.to_file_path().ok()?;
+    if !is_layout_xml_path(&path) {
+        return None;
+    }
+    let layout_data = index.layout_data_for_uri(uri.as_str())?;
+    let content = layout_content_for_uri(index, uri)?;
+    let view_id = view_id_reference_at_position(&content, position)?;
+    let field_name = binding_id_to_field_name(&view_id);
+    let expected_class = binding_class_name_for_layout(&layout_data.layout_name);
+    let decl_position = id_attribute_position(&content, &view_id)?;
+    Some(
+        find_binding_field_references(
+            index,
+            &expected_class,
+            &field_name,
+            uri,
+            decl_position.line,
+            include_decl,
+        )
+        .await,
+    )
+}
+
+fn id_attribute_position(content: &str, view_id: &str) -> Option<Position> {
+    let needle = format!("@+id/{view_id}");
+    let offset = content
+        .find(&needle)
+        .or_else(|| content.find(&format!("@id/{view_id}")))?;
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (index, character_value) in content.char_indices() {
+        if index == offset {
+            return Some(Position { line, character });
+        }
+        if character_value == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += character_value.len_utf16() as u32;
+        }
+    }
+    None
+}
+
+/// Shared binding-class resolution for staleness diagnostics (PR 6).
+pub(crate) fn binding_class_for_field_access(
+    index: &Indexer,
+    receiver_node: &Node<'_>,
+    bytes: &[u8],
+    uri: &Url,
+) -> Option<String> {
+    let receiver_type = infer_receiver_type_for_node(index, receiver_node, bytes, uri)?;
+    binding_class_from_receiver_type(&receiver_type)
+}
+
+/// Whether a binding field's id still exists in any live layout variant.
+pub(crate) fn view_id_live_for_binding_field(
+    index: &Indexer,
+    module_root: &Path,
+    layout_name: &str,
+    field_name: &str,
+) -> bool {
+    let view_id = binding_field_name_to_id(field_name);
+    if !index
+        .layouts_declaring_view_id(module_root, layout_name, &view_id)
+        .is_empty()
+    {
+        return true;
+    }
+    !index
+        .include_tag_for_field(module_root, layout_name, field_name)
+        .is_empty()
 }
 
 #[cfg(test)]

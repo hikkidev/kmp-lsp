@@ -1,6 +1,7 @@
 use super::cursor::CursorContext;
 use super::Backend;
 use crate::inlay_hints::compute_inlay_hints;
+use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -48,9 +49,44 @@ impl Backend {
             self.indexer.ensure_indexed(uri);
         }
 
+        if let Ok(path) = uri.to_file_path() {
+            if crate::indexer::is_layout_xml_path(&path) {
+                if let Some(locations) = crate::features::viewbinding::find_layout_xml_references(
+                    &self.indexer,
+                    uri,
+                    position,
+                    params.context.include_declaration,
+                )
+                .await
+                {
+                    return Ok((!locations.is_empty()).then_some(locations));
+                }
+            }
+        }
+
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
         };
+
+        if let Some(expected_class) = crate::features::viewbinding::resolve_expected_binding_class(
+            &self.indexer,
+            uri,
+            position,
+            &ctx,
+        ) {
+            if !ctx.word.starts_with_uppercase() {
+                let locations = crate::features::viewbinding::find_binding_field_references(
+                    &self.indexer,
+                    &expected_class,
+                    &ctx.word,
+                    uri,
+                    position.line,
+                    params.context.include_declaration,
+                )
+                .await;
+                return Ok((!locations.is_empty()).then_some(locations));
+            }
+        }
 
         let locations = crate::features::references::find_references_with_qualifier(
             &ctx.word,

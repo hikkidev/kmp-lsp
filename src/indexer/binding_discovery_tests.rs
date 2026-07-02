@@ -7,11 +7,13 @@ use std::time::{Duration, SystemTime};
 use tower_lsp::lsp_types::Url;
 
 use crate::indexer::binding_discovery::{
-    binding_class_name_for_layout, discover_generated_bindings, import_triggers_binding_discovery,
+    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
+    discover_generated_bindings, import_triggers_binding_discovery,
     is_generated_binding_watcher_path, layout_name_for_binding_class,
     module_root_for_generated_file, module_root_for_source_file,
 };
 use crate::indexer::cache::{save_cache, try_load_cache, CACHE_VERSION};
+use crate::indexer::test_helpers::with_xdg_cache;
 use crate::indexer::layout::{
     build_layout_file_data, layout_path_components, parse_layout_xml, LayoutPathComponents,
 };
@@ -119,6 +121,9 @@ fn binding_name_mapping_roundtrip_and_edge_cases() {
     assert_eq!(layout_name_for_binding_class("NotBind"), None);
     assert_eq!(layout_name_for_binding_class("Binding"), None);
     assert_eq!(layout_name_for_binding_class("FooBar"), None);
+
+    assert_eq!(binding_id_to_field_name("foo_bar"), "fooBar");
+    assert_eq!(binding_field_name_to_id("fooBar"), "foo_bar");
 }
 
 #[test]
@@ -276,27 +281,27 @@ fn generated_bindings_cache_roundtrip() {
     indexer.index_generated_bindings(&module_root);
 
     let cache_base = temp.path().join("cache");
-    std::env::set_var("XDG_CACHE_HOME", &cache_base);
-    save_cache(
-        &root,
-        &indexer.files,
-        &indexer.content_hashes,
-        &indexer.library_uris,
-        &indexer.layouts,
-        &indexer.generated_bindings,
-        true,
-        true,
-    );
+    with_xdg_cache(&cache_base, || {
+        save_cache(
+            &root,
+            &indexer.files,
+            &indexer.content_hashes,
+            &indexer.library_uris,
+            &indexer.layouts,
+            &indexer.generated_bindings,
+            true,
+            true,
+        );
 
-    let loaded = try_load_cache(&root).expect("cache loaded");
-    assert_eq!(loaded.version, CACHE_VERSION);
-    let module_key = module_root.to_string_lossy().to_string();
-    let cached = loaded
-        .generated_bindings
-        .get(&module_key)
-        .expect("module cache entry");
-    assert!(cached.entries.contains_key("FooBarBinding"));
-    std::env::remove_var("XDG_CACHE_HOME");
+        let loaded = try_load_cache(&root).expect("cache loaded");
+        assert_eq!(loaded.version, CACHE_VERSION);
+        let module_key = module_root.to_string_lossy().to_string();
+        let cached = loaded
+            .generated_bindings
+            .get(&module_key)
+            .expect("module cache entry");
+        assert!(cached.entries.contains_key("FooBarBinding"));
+    });
 }
 
 #[test]

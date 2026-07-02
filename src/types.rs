@@ -194,6 +194,9 @@ pub(crate) struct SymbolEntry {
     /// Used by completion to hide (library) or deprioritize + tag (workspace) the symbol.
     #[serde(default)]
     pub deprecated: bool,
+    /// True when the Java field carries `@Nullable` (AGP emits this for ids absent in some variants).
+    #[serde(default)]
+    pub nullable: bool,
 }
 
 impl SymbolEntry {

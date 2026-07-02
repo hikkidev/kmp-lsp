@@ -33,4 +33,5 @@ pub(crate) mod text_utils;
 pub(crate) mod traits;
 mod traits_impl;
 pub(crate) mod viewbinding;
+pub(crate) mod viewbinding_diagnostics;
 pub(crate) mod workspace_symbols;

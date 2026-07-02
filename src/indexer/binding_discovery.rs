@@ -141,6 +141,27 @@ pub(crate) fn binding_field_name_to_id(field_name: &str) -> String {
     pascal_case_to_snake_case(field_name)
 }
 
+/// Layout view id → ViewBinding field name (`foo_bar` → `fooBar`).
+pub(crate) fn binding_id_to_field_name(id: &str) -> String {
+    snake_case_to_camel_case(id)
+}
+
+fn snake_case_to_camel_case(name: &str) -> String {
+    let mut segments = name.split('_').filter(|segment| !segment.is_empty());
+    let Some(first) = segments.next() else {
+        return String::new();
+    };
+    let mut result = first.to_string();
+    for segment in segments {
+        let mut characters = segment.chars();
+        if let Some(first_char) = characters.next() {
+            result.extend(first_char.to_uppercase());
+            result.extend(characters.flat_map(char::to_lowercase));
+        }
+    }
+    result
+}
+
 // ─── Package verification ─────────────────────────────────────────────────────
 
 fn package_from_java_source(content: &str) -> Option<String> {
@@ -543,6 +564,29 @@ impl super::Indexer {
                     .map(|include| (uri, include.tag_range))
             })
             .collect()
+    }
+
+    /// True when a generated binding class has been discovered for `class_name` in `module_root`.
+    pub(crate) fn generated_binding_discovered(&self, module_root: &Path, class_name: &str) -> bool {
+        self.generated_bindings
+            .get(module_root)
+            .is_some_and(|module| module.entries.contains_key(class_name))
+    }
+
+    /// True when at least one layout variant exists for `layout_name` in `module_root`.
+    pub(crate) fn layout_exists_for_binding(&self, module_root: &Path, layout_name: &str) -> bool {
+        !self.matching_layout_entries(module_root, layout_name).is_empty()
+    }
+
+    /// True when any layout variant for `layout_name` opts out via `tools:viewBindingIgnore`.
+    pub(crate) fn any_layout_variant_ignores_view_binding(
+        &self,
+        module_root: &Path,
+        layout_name: &str,
+    ) -> bool {
+        self.matching_layout_entries(module_root, layout_name)
+            .iter()
+            .any(|(_uri, data)| data.view_binding_ignore)
     }
 
     /// True when `uri` is a discovered generated binding file (side-index membership).

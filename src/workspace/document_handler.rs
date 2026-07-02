@@ -10,6 +10,9 @@ use crate::features::call_arg_diagnostics::call_arg_diagnostics;
 use crate::features::code_actions::missing_package_diagnostic;
 use crate::features::fill_when::when_diagnostics;
 use crate::features::nullable_call_diagnostics::nullable_dot_call_diagnostics;
+use crate::features::viewbinding_diagnostics::{
+    stale_binding_field_diagnostics, viewbinding_import_diagnostics,
+};
 use crate::indexer::is_layout_xml_path;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::{Indexer, ProgressReporter};
@@ -202,7 +205,9 @@ impl DocumentHandler {
                         if let Some(ref doc) = live_doc {
                             d.extend(call_arg_diagnostics(&indexer, &uri, doc));
                             d.extend(nullable_dot_call_diagnostics(&indexer, &uri, doc));
+                            d.extend(stale_binding_field_diagnostics(&indexer, &uri, doc));
                         }
+                        d.extend(viewbinding_import_diagnostics(&indexer, &uri));
                     }
                     let lines = indexer.mem_lines_for(uri.as_str());
                     let lines: Vec<String> = lines
@@ -254,7 +259,9 @@ impl DocumentHandler {
                         if let Some(doc) = indexer.live_doc(&uri) {
                             d.extend(call_arg_diagnostics(&indexer, &uri, &doc));
                             d.extend(nullable_dot_call_diagnostics(&indexer, &uri, &doc));
+                            d.extend(stale_binding_field_diagnostics(&indexer, &uri, &doc));
                         }
+                        d.extend(viewbinding_import_diagnostics(&indexer, &uri));
                         let lines = indexer.mem_lines_for(uri.as_str());
                         let lines: Vec<String> = lines
                             .as_ref()
