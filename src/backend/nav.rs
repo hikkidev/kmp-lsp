@@ -32,6 +32,12 @@ impl Backend {
             return Ok(None);
         };
 
+        if let Some(response) =
+            viewbinding::find_binding_field_definition(&self.indexer, uri, position, &ctx)
+        {
+            return Ok(self.rewrite_jar_targets_off_thread(Some(response)).await);
+        }
+
         let response = def::find_definition(&ctx, &*self.indexer, uri, position).await;
         Ok(self.rewrite_jar_targets_off_thread(response).await)
     }

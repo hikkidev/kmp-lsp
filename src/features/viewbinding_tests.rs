@@ -1291,3 +1291,220 @@ fn xml_view_id_lookup_maps_utf16_column_to_bytes() {
         "UTF-16 column must be converted to a byte column before the tree-sitter lookup"
     );
 }
+
+const AVATAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:id="@+id/avatar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+</LinearLayout>
+"#;
+
+const AVATAR_BINDING_JAVA: &str = r#"package com.example.app.databinding;
+
+import android.widget.ImageView;
+
+public final class ProfileBinding {
+    public final ImageView avatar;
+
+    private ProfileBinding(ImageView avatar) {
+        this.avatar = avatar;
+    }
+}
+"#;
+
+/// Layout files exist on disk but are absent from the layout side index — cold-start gap.
+struct ColdStartFixture {
+    _temp: tempfile::TempDir,
+    module_root: PathBuf,
+    kotlin_uri: Url,
+    kotlin_source: String,
+    layout_uri: Url,
+    indexer: Arc<Indexer>,
+}
+
+impl ColdStartFixture {
+    fn build() -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let module_root = temp.path().join("app");
+        let layout_dir = module_root.join("src/main/res/layout");
+        fs::create_dir_all(&layout_dir).expect("mkdir layout");
+
+        let layout_path = layout_dir.join("profile.xml");
+        fs::write(&layout_path, AVATAR_LAYOUT).expect("write layout");
+
+        let binding_java_path = module_root.join(
+            "build/generated/source/databinding/com/example/app/databinding/ProfileBinding.java",
+        );
+        fs::create_dir_all(binding_java_path.parent().unwrap()).expect("mkdir binding");
+        fs::write(&binding_java_path, AVATAR_BINDING_JAVA).expect("write binding java");
+
+        let kotlin_path = module_root.join("src/main/kotlin/com/example/ProfileScreen.kt");
+        fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir kotlin");
+        let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.ProfileBinding
+
+class ProfileScreen {
+    fun show(binding: ProfileBinding) {
+        binding.avatar
+    }
+}
+"#;
+        fs::write(&kotlin_path, kotlin_source).expect("write kotlin");
+
+        let indexer = Arc::new(Indexer::new());
+        indexer.workspace_root.set(temp.path().to_path_buf());
+
+        let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
+        let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
+
+        // Deliberately skip index_layout_content — only bindings + Kotlin.
+        indexer.index_generated_bindings(&module_root);
+        indexer.index_content(&kotlin_uri, kotlin_source);
+        indexer.set_live_lines(&kotlin_uri, kotlin_source);
+        indexer.store_live_tree(&kotlin_uri, kotlin_source);
+
+        Self {
+            _temp: temp,
+            module_root,
+            kotlin_uri,
+            kotlin_source: kotlin_source.to_string(),
+            layout_uri,
+            indexer,
+        }
+    }
+}
+
+#[tokio::test]
+async fn definition_on_binding_type_uses_on_demand_layout_indexing() {
+    let fixture = ColdStartFixture::build();
+    assert!(
+        fixture
+            .indexer
+            .layout_uris_for_binding_class("ProfileBinding", &fixture.module_root)
+            .is_empty(),
+        "fixture must start without layout side index entries"
+    );
+
+    let context = ViewBindingFixture::cursor_context("ProfileBinding", None);
+    let position =
+        ViewBindingFixture::position_in(&fixture.kotlin_source, "binding: ProfileBinding");
+    let response = find_definition(&context, &*fixture.indexer, &fixture.kotlin_uri, position)
+        .await
+        .expect("definition response");
+    let locations = response_locations(Some(response));
+
+    assert_eq!(locations.len(), 1);
+    assert_eq!(uri_path_string(&locations[0]), "profile.xml");
+    assert_eq!(locations[0].range.start.line, 0);
+}
+
+#[tokio::test]
+async fn definition_on_binding_field_uses_on_demand_layout_indexing() {
+    let fixture = ColdStartFixture::build();
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.avatar");
+    let context = ViewBindingFixture::cursor_context("avatar", Some("binding"));
+
+    let response = find_definition(&context, &*fixture.indexer, &fixture.kotlin_uri, position)
+        .await
+        .expect("definition response");
+    let locations = response_locations(Some(response));
+
+    assert_eq!(locations.len(), 1);
+    assert_eq!(uri_path_string(&locations[0]), "profile.xml");
+    assert!(locations[0].range.start.line > 0);
+}
+
+#[test]
+fn remap_keeps_generated_java_when_no_layouts_exist() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let binding_java_path = module_root
+        .join("build/generated/source/databinding/com/example/app/databinding/ProfileBinding.java");
+    fs::create_dir_all(binding_java_path.parent().unwrap()).expect("mkdir binding");
+    fs::write(&binding_java_path, AVATAR_BINDING_JAVA).expect("write binding java");
+
+    let indexer = Indexer::new();
+    indexer.index_generated_bindings(&module_root);
+    let binding_java_uri = Url::from_file_path(&binding_java_path).expect("binding uri");
+    let binding_locations =
+        indexer.find_definition_qualified("ProfileBinding", None, &binding_java_uri);
+    assert!(!binding_locations.is_empty());
+
+    let remapped = remap_generated_binding_definitions(&indexer, binding_locations.clone());
+    assert!(
+        !remapped.is_empty(),
+        "remap must keep generated Java when no layouts exist"
+    );
+    assert!(
+        remapped
+            .iter()
+            .any(|location| location.uri.as_str().contains("ProfileBinding.java")),
+        "expected at least one generated Java fallback, got: {remapped:?}"
+    );
+}
+
+#[test]
+fn view_id_matches_lookup_accepts_camel_case_ids() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let layout_path = module_root.join("src/main/res/layout/camel_case.xml");
+    fs::create_dir_all(layout_path.parent().unwrap()).expect("mkdir layout");
+    let layout = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android">
+    <TextView android:id="@+id/fooBar" />
+</LinearLayout>
+"#;
+    fs::write(&layout_path, layout).expect("write layout");
+
+    let indexer = Indexer::new();
+    let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
+    indexer.index_layout_content(&layout_uri, layout);
+
+    let snake_targets = indexer.layouts_declaring_view_id(&module_root, "camel_case", "foo_bar");
+    assert_eq!(
+        snake_targets.len(),
+        1,
+        "snake_case lookup must match camelCase @+id"
+    );
+}
+
+#[tokio::test]
+async fn xml_references_use_binding_verification_not_text_search() {
+    let fixture = ColdStartFixture::build();
+
+    let decoy_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/Decoy.kt");
+    fs::create_dir_all(decoy_path.parent().unwrap()).expect("mkdir decoy");
+    let decoy_source = r#"package com.example
+
+class Decoy {
+    fun noise() {
+        val avatar = "avatar"
+        println(avatar)
+    }
+}
+"#;
+    fs::write(&decoy_path, decoy_source).expect("write decoy");
+    let decoy_uri = Url::from_file_path(&decoy_path).expect("decoy uri");
+    fixture.indexer.index_content(&decoy_uri, decoy_source);
+
+    let xml_position = ViewBindingFixture::position_in(AVATAR_LAYOUT, "@+id/avatar");
+    let references =
+        find_layout_xml_references(&fixture.indexer, &fixture.layout_uri, xml_position, false)
+            .await
+            .expect("layout xml references");
+
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].uri, fixture.kotlin_uri);
+    assert!(
+        !references.iter().any(|location| location.uri == decoy_uri),
+        "decoy bare `avatar` usages must not appear in binding-field references"
+    );
+}

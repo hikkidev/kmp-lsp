@@ -146,6 +146,14 @@ pub(crate) fn binding_id_to_field_name(id: &str) -> String {
     snake_case_to_camel_case(id)
 }
 
+/// True when a layout `@+id/…` value matches a field lookup id (snake or camelCase).
+pub(crate) fn view_id_matches_lookup(view_id: &str, lookup_id: &str) -> bool {
+    if view_id == lookup_id {
+        return true;
+    }
+    binding_id_to_field_name(view_id) == binding_id_to_field_name(lookup_id)
+}
+
 fn snake_case_to_camel_case(name: &str) -> String {
     let mut segments = name.split('_').filter(|segment| !segment.is_empty());
     let Some(first) = segments.next() else {
@@ -578,7 +586,7 @@ impl super::Indexer {
             .filter_map(|(uri, data)| {
                 data.view_ids
                     .iter()
-                    .find(|view_id| view_id.id == id)
+                    .find(|view_id| view_id_matches_lookup(&view_id.id, id))
                     .map(|view_id| (uri, view_id.id_attribute_range))
             })
             .collect()
@@ -591,13 +599,17 @@ impl super::Indexer {
         layout_name: &str,
         field_name: &str,
     ) -> Vec<(String, Range)> {
-        let id = binding_field_name_to_id(field_name);
+        let lookup_id = binding_field_name_to_id(field_name);
         self.matching_layout_entries(module_root, layout_name)
             .into_iter()
             .filter_map(|(uri, data)| {
                 data.includes
                     .iter()
-                    .find(|include| include.id.as_deref() == Some(id.as_str()))
+                    .find(|include| {
+                        include.id.as_deref().is_some_and(|include_id| {
+                            view_id_matches_lookup(include_id, &lookup_id)
+                        })
+                    })
                     .map(|include| (uri, include.tag_range))
             })
             .collect()
