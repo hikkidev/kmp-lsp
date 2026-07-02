@@ -7,10 +7,9 @@ use std::time::{Duration, SystemTime};
 use tower_lsp::lsp_types::Url;
 
 use crate::indexer::binding_discovery::{
-    binding_class_name_for_layout, discover_generated_bindings,
-    import_triggers_binding_discovery, is_generated_binding_watcher_path,
-    layout_name_for_binding_class, module_root_for_generated_file,
-    module_root_for_source_file,
+    binding_class_name_for_layout, discover_generated_bindings, import_triggers_binding_discovery,
+    is_generated_binding_watcher_path, layout_name_for_binding_class,
+    module_root_for_generated_file, module_root_for_source_file,
 };
 use crate::indexer::cache::{save_cache, try_load_cache, CACHE_VERSION};
 use crate::indexer::layout::{
@@ -18,7 +17,6 @@ use crate::indexer::layout::{
 };
 use crate::indexer::Indexer;
 use crate::types::ImportEntry;
-
 
 const SAMPLE_BINDING_JAVA: &str = r#"package com.example.app.databinding;
 
@@ -62,9 +60,8 @@ fn discover_generated_bindings_finds_nested_agp_paths() {
 fn discover_generated_bindings_rejects_wrong_package() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("app");
-    let binding_path = module_root.join(
-        "build/generated/source/debug/databinding/FooBarBinding.java",
-    );
+    let binding_path =
+        module_root.join("build/generated/source/debug/databinding/FooBarBinding.java");
     write_binding_java(&binding_path, WRONG_PACKAGE_BINDING_JAVA);
 
     let discovered = discover_generated_bindings(&module_root);
@@ -101,28 +98,19 @@ fn discover_generated_bindings_prefers_newer_mtime() {
 
 #[test]
 fn binding_name_mapping_roundtrip_and_edge_cases() {
-    assert_eq!(
-        binding_class_name_for_layout("foo_bar"),
-        "FooBarBinding"
-    );
+    assert_eq!(binding_class_name_for_layout("foo_bar"), "FooBarBinding");
     assert_eq!(
         layout_name_for_binding_class("FooBarBinding"),
         Some("foo_bar".to_string())
     );
 
-    assert_eq!(
-        binding_class_name_for_layout("screen"),
-        "ScreenBinding"
-    );
+    assert_eq!(binding_class_name_for_layout("screen"), "ScreenBinding");
     assert_eq!(
         layout_name_for_binding_class("ScreenBinding"),
         Some("screen".to_string())
     );
 
-    assert_eq!(
-        binding_class_name_for_layout("item2"),
-        "Item2Binding"
-    );
+    assert_eq!(binding_class_name_for_layout("item2"), "Item2Binding");
     assert_eq!(
         layout_name_for_binding_class("Item2Binding"),
         Some("item2".to_string())
@@ -153,17 +141,20 @@ fn import_trigger_pattern_matches_databinding_only() {
     assert!(import_triggers_binding_discovery(
         "com.example.app.databinding.FooBarBinding"
     ));
-    assert!(!import_triggers_binding_discovery("com.example.app.ui.FooBarBinding"));
-    assert!(!import_triggers_binding_discovery("com.example.app.databinding.*"));
+    assert!(!import_triggers_binding_discovery(
+        "com.example.app.ui.FooBarBinding"
+    ));
+    assert!(!import_triggers_binding_discovery(
+        "com.example.app.databinding.*"
+    ));
 }
 
 #[test]
 fn import_triggered_indexing_makes_generated_class_resolvable() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("app");
-    let binding_path = module_root.join(
-        "build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java",
-    );
+    let binding_path = module_root
+        .join("build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java");
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
     let kotlin_path = module_root.join("src/main/kotlin/com/example/MainActivity.kt");
@@ -195,9 +186,8 @@ class MainActivity {
 fn is_generated_binding_uri_distinguishes_generated_from_handwritten() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("app");
-    let generated_path = module_root.join(
-        "build/generated/databinding/com/example/app/databinding/FooBarBinding.java",
-    );
+    let generated_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
     write_binding_java(&generated_path, SAMPLE_BINDING_JAVA);
 
     let handwritten_path = module_root.join("src/main/java/com/example/FooBarBinding.java");
@@ -264,13 +254,10 @@ fn layouts_for_binding_class_pairs_by_module_and_orders_default_first() {
 
 #[test]
 fn watcher_path_matcher_requires_build_and_databinding_segments() {
-    let valid = PathBuf::from(
-        "app/build/generated/databinding/com/example/FooBarBinding.java",
-    );
+    let valid = PathBuf::from("app/build/generated/databinding/com/example/FooBarBinding.java");
     assert!(is_generated_binding_watcher_path(&valid));
 
-    let missing_databinding =
-        PathBuf::from("app/build/generated/source/FooBarBinding.java");
+    let missing_databinding = PathBuf::from("app/build/generated/source/FooBarBinding.java");
     assert!(!is_generated_binding_watcher_path(&missing_databinding));
 }
 
@@ -281,9 +268,8 @@ fn generated_bindings_cache_roundtrip() {
     fs::create_dir_all(&root).expect("mkdir workspace");
 
     let module_root = temp.path().join("app");
-    let binding_path = module_root.join(
-        "build/generated/databinding/com/example/app/databinding/FooBarBinding.java",
-    );
+    let binding_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
     let indexer = Indexer::new();
@@ -324,18 +310,15 @@ fn index_layout_content_triggers_binding_discovery() {
     fs::create_dir_all(layout_path.parent().unwrap()).expect("mkdir layout");
     fs::write(&layout_path, layout_xml).expect("write layout");
 
-    let binding_path = module_root.join(
-        "build/generated/databinding/com/example/app/databinding/FooBarBinding.java",
-    );
+    let binding_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async {
         let indexer = Arc::new(Indexer::new());
         indexer.set_binding_discovery_handle(
-            crate::indexer::binding_discovery::spawn_binding_discovery_worker(Arc::clone(
-                &indexer,
-            )),
+            crate::indexer::binding_discovery::spawn_binding_discovery_worker(Arc::clone(&indexer)),
         );
 
         let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
@@ -357,9 +340,8 @@ fn index_layout_content_triggers_binding_discovery() {
 fn watcher_touch_reindexes_generated_binding_fixture() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("app");
-    let binding_path = module_root.join(
-        "build/generated/databinding/com/example/app/databinding/FooBarBinding.java",
-    );
+    let binding_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
     let indexer = Indexer::new();
@@ -367,9 +349,7 @@ fn watcher_touch_reindexes_generated_binding_fixture() {
     let qualified_key = "com.example.app.databinding.FooBarBinding";
     assert!(indexer.qualified.contains_key(qualified_key));
 
-    let updated_source = format!(
-        "{SAMPLE_BINDING_JAVA}\n// touched\n"
-    );
+    let updated_source = format!("{SAMPLE_BINDING_JAVA}\n// touched\n");
     thread::sleep(Duration::from_millis(1100));
     fs::write(&binding_path, updated_source).expect("rewrite binding");
     indexer.index_generated_bindings(&module_root);

@@ -18,8 +18,8 @@ use tower_lsp::lsp_types::Url;
 
 use crate::types::{FileData, FileIndexResult, Visibility};
 
-use super::layout::LayoutFileData;
 use super::binding_discovery::{ModuleBindings, ModuleBindingsCacheEntry};
+use super::layout::LayoutFileData;
 
 pub(crate) use super::layout::LayoutCacheEntry;
 
@@ -298,8 +298,7 @@ pub(super) fn save_cache(
         }
     }
 
-    let mut generated_binding_entries: HashMap<String, ModuleBindingsCacheEntry> =
-        HashMap::new();
+    let mut generated_binding_entries: HashMap<String, ModuleBindingsCacheEntry> = HashMap::new();
     for module_ref in generated_bindings.iter() {
         let module_root = module_ref.key();
         generated_binding_entries.insert(

@@ -4,9 +4,9 @@
 //! `.databinding`, indexes them through the normal Java pipeline, and maintains
 //! a per-module side index for query-time layout↔class pairing (PR 4+).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashSet;
 use tokio::sync::mpsc;
@@ -42,9 +42,9 @@ pub(crate) struct ModuleBindingsCacheEntry {
 /// `<X>/build/.../FooBarBinding.java` → `<X>`.
 pub(crate) fn module_root_for_generated_file(path: &Path) -> Option<PathBuf> {
     let components: Vec<Component<'_>> = path.components().collect();
-    let build_index = components.iter().position(|component| {
-        matches!(component, Component::Normal(name) if name.to_str() == Some("build"))
-    })?;
+    let build_index = components.iter().position(
+        |component| matches!(component, Component::Normal(name) if name.to_str() == Some("build")),
+    )?;
     if build_index == 0 {
         return None;
     }
@@ -55,9 +55,9 @@ pub(crate) fn module_root_for_generated_file(path: &Path) -> Option<PathBuf> {
 /// `<X>/src/<sourceset>/...` → `<X>`.
 pub(crate) fn module_root_for_source_file(path: &Path) -> Option<PathBuf> {
     let components: Vec<Component<'_>> = path.components().collect();
-    let source_index = components.iter().position(|component| {
-        matches!(component, Component::Normal(name) if name.to_str() == Some("src"))
-    })?;
+    let source_index = components.iter().position(
+        |component| matches!(component, Component::Normal(name) if name.to_str() == Some("src")),
+    )?;
     if source_index == 0 {
         return None;
     }
@@ -229,9 +229,61 @@ pub(crate) fn import_triggers_binding_discovery(import_path: &str) -> bool {
 }
 
 pub(crate) fn file_imports_trigger_binding_discovery(imports: &[ImportEntry]) -> bool {
-    imports.iter().any(|entry| {
-        !entry.is_star && import_triggers_binding_discovery(&entry.full_path)
-    })
+    imports
+        .iter()
+        .any(|entry| !entry.is_star && import_triggers_binding_discovery(&entry.full_path))
+}
+
+// ─── Databinding poll watcher handle (PR 3) ─────────────────────────────────
+
+/// Shared registration state for the server-side databinding poll watcher.
+pub(crate) struct DatabindingWatcherState {
+    pub(crate) watched_module_roots: Mutex<HashSet<PathBuf>>,
+}
+
+impl DatabindingWatcherState {
+    pub(crate) fn new() -> Self {
+        Self {
+            watched_module_roots: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub(crate) fn registered_module_roots(&self) -> Vec<PathBuf> {
+        self.watched_module_roots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// Cheap handle for registering module roots with the databinding poll watcher.
+#[derive(Clone)]
+pub(crate) struct DatabindingWatcherHandle {
+    state: Option<Arc<DatabindingWatcherState>>,
+}
+
+impl DatabindingWatcherHandle {
+    pub(crate) fn noop() -> Self {
+        Self { state: None }
+    }
+
+    pub(crate) fn new(state: Arc<DatabindingWatcherState>) -> Self {
+        Self { state: Some(state) }
+    }
+
+    /// Register `module_root` for polling. Idempotent.
+    pub(crate) fn watch_module(&self, module_root: &Path) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        state
+            .watched_module_roots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(module_root.to_path_buf());
+    }
 }
 
 // ─── Background worker ────────────────────────────────────────────────────────
@@ -272,7 +324,9 @@ impl BindingDiscoveryHandle {
 }
 
 /// Spawn the background binding-discovery worker. Returns a handle for hot-path callers.
-pub(crate) fn spawn_binding_discovery_worker(indexer: Arc<super::Indexer>) -> BindingDiscoveryHandle {
+pub(crate) fn spawn_binding_discovery_worker(
+    indexer: Arc<super::Indexer>,
+) -> BindingDiscoveryHandle {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let in_flight = Arc::new(DashSet::new());
     let handle = BindingDiscoveryHandle {
@@ -315,9 +369,17 @@ impl super::Indexer {
     ///
     /// Idempotent and additive — safe to call repeatedly.
     ///
-    /// PR 3 extension point: register `module_root` with the server-side databinding
-    /// poll watcher here via `watch_module`.
+    pub(crate) fn set_databinding_watcher_handle(&self, handle: DatabindingWatcherHandle) {
+        if let Ok(mut guard) = self.databinding_watcher.write() {
+            *guard = handle;
+        }
+    }
+
     pub(crate) fn index_generated_bindings(&self, module_root: &Path) {
+        if let Ok(handle) = self.databinding_watcher.read() {
+            handle.watch_module(module_root);
+        }
+
         let discovered = discover_generated_bindings(module_root);
         let entries: HashMap<String, GeneratedBindingEntry> = discovered
             .into_iter()
@@ -388,9 +450,7 @@ impl super::Indexer {
             ) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => left
-                    .variant_qualifier
-                    .cmp(&right.variant_qualifier),
+                _ => left.variant_qualifier.cmp(&right.variant_qualifier),
             }
         });
         layouts
