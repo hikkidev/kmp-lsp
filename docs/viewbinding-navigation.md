@@ -1,9 +1,10 @@
 # ViewBinding Navigation — Design & Implementation Plan
 
-> Status: **agreed design, not yet implemented.** All product and architecture
-> decisions below were settled in a design session with the maintainer; this
-> document is normative. The implementation plan at the end maps the design
-> onto the codebase as a sequence of small, independently mergeable PRs.
+> Status: **v1 implemented** on branch `feature/viewbinding-navigation`.
+> All product and architecture decisions below were settled in a design session
+> with the maintainer; this document remains the normative reference for
+> behavior and naming. The implementation plan at the end records the original
+> PR sequence used to land v1.
 
 ## Goal
 

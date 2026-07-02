@@ -15,8 +15,8 @@ use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::NodeExt;
 use crate::indexer::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    is_layout_xml_path, layout_name_for_binding_class, module_root_for_generated_file,
-    module_root_for_source_file, IndexRead, Indexer,
+    find_this_context_in_lines, is_layout_xml_path, layout_name_for_binding_class,
+    module_root_for_generated_file, module_root_for_source_file, IndexRead, Indexer, ThisContext,
 };
 use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
@@ -27,7 +27,7 @@ use crate::resolver::{
     infer::infer_field_chain_type, infer_receiver_type, infer_receiver_type_at, ReceiverKind,
     ReceiverType,
 };
-use crate::types::{FileData, SymbolEntry};
+use crate::types::{CursorPos, FileData, SymbolEntry};
 use crate::StrExt;
 
 const ANDROID_TAG_PREFIXES: &[&str] = &["android.widget.", "android.view.", "android.webkit."];
@@ -595,6 +595,21 @@ pub(crate) fn resolve_expected_binding_class(
     }
 
     if let Some(qualifier) = ctx.qualifier.as_deref() {
+        if qualifier.contains('.') {
+            let segments: Vec<&str> = qualifier.split('.').collect();
+            if let Some(class_name) =
+                binding_class_for_receiver_chain(index, uri, position, &segments)
+            {
+                return Some(class_name);
+            }
+            let chain: Vec<String> = segments
+                .iter()
+                .map(|segment| (*segment).to_string())
+                .collect();
+            if let Some(receiver_type) = infer_field_chain_type(index, &chain, uri) {
+                return binding_class_from_receiver_type(&receiver_type);
+            }
+        }
         let receiver_type = infer_receiver_type_at(index, qualifier, uri, position)?;
         return binding_class_from_receiver_type(&receiver_type);
     }
@@ -615,6 +630,47 @@ fn binding_class_from_receiver_type(receiver_type: &ReceiverType) -> Option<Stri
         return Some(receiver_type.leaf.clone());
     }
     None
+}
+
+/// Walk a receiver chain through generated binding Java fields (`binding.header` →
+/// `ViewHeaderBinding`) using the importing source file for module pairing.
+fn binding_class_for_receiver_chain(
+    index: &Indexer,
+    uri: &Url,
+    position: Position,
+    segments: &[&str],
+) -> Option<String> {
+    if segments.is_empty() {
+        return None;
+    }
+    let root_type = infer_receiver_type_at(index, segments[0], uri, position)?;
+    let mut binding_class = binding_class_from_receiver_type(&root_type)?;
+    for field in &segments[1..] {
+        let field_type = java_binding_field_type(index, uri, &binding_class, field)?;
+        if !field_type.ends_with("Binding") {
+            return None;
+        }
+        binding_class = field_type;
+    }
+    Some(binding_class)
+}
+
+fn java_binding_field_type(
+    index: &Indexer,
+    uri: &Url,
+    class_name: &str,
+    field_name: &str,
+) -> Option<String> {
+    let binding_file_uri = binding_file_uri_for_source(index, uri, class_name)?;
+    let file_data = index.file_data_for(&binding_file_uri)?;
+    let symbol = file_data.symbols.iter().find(|symbol| {
+        symbol.name == field_name
+            && matches!(
+                symbol.kind,
+                SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+            )
+    })?;
+    java_field_type_from_detail(&symbol.detail, field_name)
 }
 
 fn receiver_matches_binding_class(
@@ -658,17 +714,52 @@ fn verify_binding_field_reference(
     let Some((tree, bytes)) = live_or_disk_tree(index, &location.uri) else {
         return false;
     };
-    let Some(navigation_node) =
+    let receiver_type = if let Some(navigation_node) =
         navigation_expression_at_position(&tree, &bytes, location.range.start, field_name)
-    else {
-        return false;
-    };
-    let Some(receiver_type) =
+    {
         infer_receiver_for_navigation(index, &navigation_node, &bytes, &location.uri)
-    else {
+    } else {
+        implicit_receiver_type_for_bare_field(index, &tree, &bytes, location, field_name)
+    };
+    let Some(receiver_type) = receiver_type else {
         return false;
     };
     receiver_matches_binding_class(&receiver_type, expected_binding_class)
+}
+
+fn implicit_receiver_type_for_bare_field(
+    index: &Indexer,
+    tree: &Tree,
+    bytes: &[u8],
+    location: &Location,
+    field_name: &str,
+) -> Option<ReceiverType> {
+    let root = tree.root_node();
+    let target_point = tree_sitter::Point {
+        row: location.range.start.line as usize,
+        column: location.range.start.character as usize,
+    };
+    let node = root.descendant_for_point_range(target_point, target_point)?;
+    if node.kind() != KIND_SIMPLE_IDENT {
+        return None;
+    }
+    if node.utf8_text_owned(bytes).as_deref() != Some(field_name) {
+        return None;
+    }
+    let lines = index.mem_lines_for(location.uri.as_str())?;
+    let this_context = find_this_context_in_lines(
+        &lines,
+        CursorPos {
+            line: location.range.start.line as usize,
+            utf16_col: location.range.start.character as usize,
+        },
+        index,
+        &location.uri,
+    );
+    match this_context {
+        ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
+        ThisContext::InsideReceiver | ThisContext::NotFound => None,
+    }
 }
 
 fn live_or_disk_tree(index: &Indexer, uri: &Url) -> Option<(Tree, Vec<u8>)> {
@@ -757,7 +848,17 @@ fn infer_receiver_type_for_node(
             if chain.len() < 2 || chain[0] == "this" || chain[0] == "super" {
                 return None;
             }
-            infer_field_chain_type(index, &chain, uri)
+            if let Some(receiver_type) = infer_field_chain_type(index, &chain, uri) {
+                return Some(receiver_type);
+            }
+            let start = receiver_node.start_position();
+            let line_start_offsets = line_starts(bytes);
+            let utf16_column =
+                ts_byte_col_to_utf16(bytes, &line_start_offsets, start.row, start.column);
+            let position = Position::new(start.row as u32, utf16_column as u32);
+            let segments: Vec<&str> = chain.iter().map(String::as_str).collect();
+            binding_class_for_receiver_chain(index, uri, position, &segments)
+                .map(ReceiverType::from_raw)
         }
         _ => None,
     }

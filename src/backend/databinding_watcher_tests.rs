@@ -195,3 +195,91 @@ async fn rapid_binding_writes_coalesce_to_one_rediscovery() {
         "rapid writes within one poll interval should coalesce to a single re-discovery"
     );
 }
+
+#[tokio::test]
+async fn watcher_clears_build_required_import_diagnostic_after_discovery() {
+    use tower_lsp::lsp_types::Url;
+
+    use crate::features::viewbinding_diagnostics::viewbinding_import_diagnostics;
+
+    const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+</LinearLayout>
+"#;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let layout_dir = module_root.join("src/main/res/layout");
+    fs::create_dir_all(&layout_dir).expect("mkdir layout");
+    let layout_path = layout_dir.join("foo_bar.xml");
+    fs::write(&layout_path, FOO_BAR_LAYOUT).expect("write layout");
+
+    let kotlin_path = module_root.join("src/main/kotlin/com/example/MainActivity.kt");
+    fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir kotlin");
+    let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        binding.title
+    }
+}
+"#;
+    fs::write(&kotlin_path, kotlin_source).expect("write kotlin");
+
+    let indexer = Arc::new(Indexer::new());
+    let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
+    let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
+    indexer.index_layout_content(&layout_uri, FOO_BAR_LAYOUT);
+    indexer.index_content(&kotlin_uri, kotlin_source);
+    indexer.set_live_lines(&kotlin_uri, kotlin_source);
+    indexer.store_live_tree(&kotlin_uri, kotlin_source);
+
+    assert_eq!(
+        viewbinding_import_diagnostics(&indexer, &kotlin_uri).len(),
+        1,
+        "build-required warning expected before generated class exists"
+    );
+
+    let (republish_tx, mut republish_rx) = mpsc::channel(4);
+    let handle = spawn_test_watcher(Arc::clone(&indexer), republish_tx);
+    indexer.set_databinding_watcher_handle(handle.clone());
+    handle.watch_module(&module_root);
+
+    write_binding_java(&binding_path(&module_root), SAMPLE_BINDING_JAVA);
+
+    let qualified_key = "com.example.app.databinding.FooBarBinding";
+    let indexer_for_poll = Arc::clone(&indexer);
+    poll_until(
+        move || indexer_for_poll.qualified.contains_key(qualified_key),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                republish_rx.recv().await,
+                Some(Event::RepublishOpenFileDiagnostics)
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("watcher must request diagnostic republish after binding discovery");
+
+    let diags = viewbinding_import_diagnostics(&indexer, &kotlin_uri);
+    assert!(
+        diags.is_empty(),
+        "build-required diagnostic must clear after watcher discovery: {diags:?}"
+    );
+}

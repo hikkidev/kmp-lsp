@@ -499,3 +499,7 @@ impl LanguageServer for Backend {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "watched_files_tests.rs"]
+mod watched_files_tests;

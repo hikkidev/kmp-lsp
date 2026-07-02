@@ -296,6 +296,35 @@ fn import_diagnostic_clears_after_binding_discovered() {
 }
 
 #[test]
+fn import_diagnostic_absent_when_no_layout_and_no_generated_class() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let kotlin_path = module_root.join("src/main/kotlin/com/example/MainActivity.kt");
+    fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir kotlin");
+    let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.MissingBinding
+
+class MainActivity {
+    fun demo() {}
+}
+"#;
+    fs::write(&kotlin_path, kotlin_source).expect("write kotlin");
+
+    let indexer = Arc::new(Indexer::new());
+    let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
+    indexer.index_content(&kotlin_uri, kotlin_source);
+    indexer.set_live_lines(&kotlin_uri, kotlin_source);
+    indexer.store_live_tree(&kotlin_uri, kotlin_source);
+
+    let diags = viewbinding_import_diagnostics(&indexer, &kotlin_uri);
+    assert!(
+        diags.is_empty(),
+        "import with neither layout nor generated class must stay silent: {diags:?}"
+    );
+}
+
+#[test]
 fn generated_binding_discovered_read_helper() {
     let fixture = DiagnosticsFixture::build(FOO_BAR_LAYOUT, true);
     assert!(fixture

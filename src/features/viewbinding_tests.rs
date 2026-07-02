@@ -205,6 +205,25 @@ class MainActivity {
         }
         Position { line, character }
     }
+
+    fn position_on_word_in_line(source: &str, line_needle: &str, word: &str) -> Position {
+        let line_start = source.find(line_needle).expect("line needle in source");
+        let word_start = source[line_start..].find(word).expect("word in line") + line_start;
+        let mut line = 0_u32;
+        let mut character = 0_u32;
+        for (index, ch) in source.char_indices() {
+            if index == word_start {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += ch.len_utf8() as u32;
+            }
+        }
+        Position { line, character }
+    }
 }
 
 fn response_locations(response: Option<GotoDefinitionResponse>) -> Vec<Location> {
@@ -946,6 +965,228 @@ fn open_layout_routes_to_layout_side_index() {
         .expect("layout indexed");
     assert_eq!(data.layout_name, "foo_bar");
     assert!(!data.view_ids.is_empty());
+}
+
+#[tokio::test]
+async fn definition_on_import_line_remaps_to_layout() {
+    let fixture = ViewBindingFixture::build();
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "FooBarBinding");
+    let import_line = fixture
+        .kotlin_source
+        .lines()
+        .nth(position.line as usize)
+        .unwrap();
+    assert!(
+        import_line.contains("import"),
+        "cursor must be on the import line: {import_line}"
+    );
+
+    let context = ViewBindingFixture::cursor_context("FooBarBinding", None);
+    let response = find_definition(&context, &*fixture.indexer, &fixture.kotlin_uri, position)
+        .await
+        .expect("definition response");
+    let locations = response_locations(Some(response));
+
+    assert!(!locations.is_empty());
+    assert_eq!(uri_path_string(&locations[0]), "foo_bar.xml");
+    assert_eq!(locations[0].range.start.line, 0);
+}
+
+#[tokio::test]
+async fn bare_unqualified_scope_function_definition_and_references() {
+    let fixture = ViewBindingFixture::build();
+    let scope_function_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/BareScopeAccess.kt");
+    fs::create_dir_all(scope_function_path.parent().unwrap()).expect("mkdir bare scope");
+    let scope_function_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+fun withBlock(binding: FooBarBinding) {
+    with(binding) { title }
+}
+
+fun applyBlock(binding: FooBarBinding) {
+    binding.apply { title }
+}
+
+fun runBlock(binding: FooBarBinding) {
+    binding.run { title }
+}
+
+class NotABinding {
+    val title: String = "misleading"
+}
+
+fun misleadingWith(competitor: NotABinding) {
+    with(competitor) { title }
+}
+"#;
+    fs::write(&scope_function_path, scope_function_source).expect("write bare scope");
+    let scope_function_uri = Url::from_file_path(&scope_function_path).expect("scope uri");
+    fixture
+        .indexer
+        .index_content(&scope_function_uri, scope_function_source);
+    fixture
+        .indexer
+        .set_live_lines(&scope_function_uri, scope_function_source);
+    fixture
+        .indexer
+        .store_live_tree(&scope_function_uri, scope_function_source);
+
+    for line_needle in [
+        "with(binding) { title }",
+        "binding.apply { title }",
+        "binding.run { title }",
+    ] {
+        let position = ViewBindingFixture::position_on_word_in_line(
+            scope_function_source,
+            line_needle,
+            "title",
+        );
+        let context =
+            CursorContext::build(&fixture.indexer, &scope_function_uri, position).expect("context");
+        let response = find_definition(&context, &*fixture.indexer, &scope_function_uri, position)
+            .await
+            .expect("definition for bare scope access");
+        let locations = response_locations(Some(response));
+        assert_eq!(
+            locations.len(),
+            2,
+            "expected layout remap for {line_needle}, got {locations:?}"
+        );
+        assert!(locations
+            .iter()
+            .all(|location| uri_path_string(location) == "foo_bar.xml"));
+    }
+
+    let anchor_position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
+    let references = find_binding_field_references(
+        &fixture.indexer,
+        "FooBarBinding",
+        "title",
+        &fixture.kotlin_uri,
+        anchor_position.line,
+        false,
+    )
+    .await;
+
+    let with_line = ViewBindingFixture::position_on_word_in_line(
+        scope_function_source,
+        "with(binding) { title }",
+        "title",
+    )
+    .line;
+    let apply_line = ViewBindingFixture::position_on_word_in_line(
+        scope_function_source,
+        "binding.apply { title }",
+        "title",
+    )
+    .line;
+    let run_line = ViewBindingFixture::position_on_word_in_line(
+        scope_function_source,
+        "binding.run { title }",
+        "title",
+    )
+    .line;
+    let misleading_line = ViewBindingFixture::position_on_word_in_line(
+        scope_function_source,
+        "with(competitor) { title }",
+        "title",
+    )
+    .line;
+
+    let lines_in_scope_file: Vec<u32> = references
+        .iter()
+        .filter(|location| location.uri == scope_function_uri)
+        .map(|location| location.range.start.line)
+        .collect();
+    assert!(
+        lines_in_scope_file.contains(&with_line),
+        "bare `title` in `with(binding)` must verify, got {lines_in_scope_file:?}"
+    );
+    assert!(
+        lines_in_scope_file.contains(&apply_line),
+        "bare `title` in `apply` must verify, got {lines_in_scope_file:?}"
+    );
+    assert!(
+        lines_in_scope_file.contains(&run_line),
+        "bare `title` in `run` must verify, got {lines_in_scope_file:?}"
+    );
+    assert!(
+        !lines_in_scope_file.contains(&misleading_line),
+        "bare `title` on non-binding receiver must be excluded, got {lines_in_scope_file:?}"
+    );
+}
+
+#[tokio::test]
+async fn chained_include_field_references_from_nested_position() {
+    let fixture = ViewBindingFixture::build();
+    let position = ViewBindingFixture::position_on_word_in_line(
+        &fixture.kotlin_source,
+        "binding.header.title",
+        "title",
+    );
+    let context =
+        CursorContext::build(&fixture.indexer, &fixture.kotlin_uri, position).expect("context");
+    let expected_class =
+        resolve_expected_binding_class(&fixture.indexer, &fixture.kotlin_uri, position, &context)
+            .expect("expected ViewHeaderBinding for chained include field");
+    assert_eq!(expected_class, "ViewHeaderBinding");
+
+    let references = find_binding_field_references(
+        &fixture.indexer,
+        &expected_class,
+        "title",
+        &fixture.kotlin_uri,
+        position.line,
+        false,
+    )
+    .await;
+    assert!(
+        references.iter().any(|location| {
+            location.uri == fixture.kotlin_uri
+                && location.range.start.line
+                    == ViewBindingFixture::position_in(
+                        &fixture.kotlin_source,
+                        "binding.header.title",
+                    )
+                    .line
+        }),
+        "chained include field must find its own usage: {references:?}"
+    );
+    assert!(
+        !references.iter().any(|location| {
+            location.uri == fixture.kotlin_uri
+                && location.range.start.line
+                    == ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title").line
+        }),
+        "must not conflate parent binding title with include title: {references:?}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_include_field_shows_binding_type() {
+    let fixture = ViewBindingFixture::build();
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.header");
+    let context = ViewBindingFixture::cursor_context("header", Some("binding"));
+    let hover = compute_hover(
+        fixture.indexer.as_ref(),
+        &context,
+        &fixture.kotlin_uri,
+        position,
+    )
+    .expect("hover on include field");
+    let markdown = match hover.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(content) => content.value,
+        _ => panic!("expected markdown hover"),
+    };
+    assert!(
+        markdown.contains("val header: ViewHeaderBinding"),
+        "got: {markdown}"
+    );
+    assert!(!markdown.contains("com.example.app.databinding"));
 }
 
 #[test]

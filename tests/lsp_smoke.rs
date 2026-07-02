@@ -698,3 +698,92 @@ class MainActivity {
         "definition must remap FooBarBinding type to layout XML;\n  expected: {expected_layout_uri}\n  got:      {target_uri}\n  full:     {result}"
     );
 }
+
+/// ViewBinding: hover on `binding.title` shows Kotlin-style field type.
+#[test]
+fn smoke_viewbinding_hover_on_binding_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    write(root, "workspace.json", r#"{"sourcePaths":[]}"#);
+
+    write(
+        root,
+        "app/src/main/res/layout/foo_bar.xml",
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+</LinearLayout>
+"#,
+    );
+
+    write(
+        root,
+        "app/build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java",
+        r#"package com.example.app.databinding;
+
+import android.widget.TextView;
+
+public final class FooBarBinding {
+    public final TextView title;
+
+    private FooBarBinding(TextView title) {
+        this.title = title;
+    }
+}
+"#,
+    );
+
+    let usage_text = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        binding.title
+    }
+}
+"#;
+    write(
+        root,
+        "app/src/main/kotlin/com/example/MainActivity.kt",
+        usage_text,
+    );
+
+    let mut client = LspClient::spawn(root);
+    client.initialize(root);
+    client.wait_for_indexing();
+
+    let uri = file_uri(root, "app/src/main/kotlin/com/example/MainActivity.kt");
+    client.open_file(&uri, "kotlin", usage_text);
+
+    let resp = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": {"uri": uri},
+            "position": pos(usage_text, 6, 16),
+        }),
+    );
+
+    let contents = &resp["result"]["contents"];
+    let markdown = if contents.is_object() {
+        contents["value"].as_str().unwrap_or("").to_owned()
+    } else {
+        contents.as_str().unwrap_or("").to_owned()
+    };
+
+    assert!(
+        markdown.contains("val title: TextView"),
+        "hover must show binding field type; got: {markdown:?}\nfull: {resp}"
+    );
+    assert!(
+        !markdown.contains("android.widget"),
+        "hover must use short type names; got: {markdown:?}"
+    );
+}
