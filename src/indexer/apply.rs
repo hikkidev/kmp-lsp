@@ -23,7 +23,8 @@ use tower_lsp::lsp_types::*;
 
 use super::{FileContributions, Indexer, StaleKeys};
 use crate::indexer::cache::{build_qualified_keys, FileCacheEntry};
-use crate::indexer::discover::find_source_files_unconstrained;
+use crate::indexer::discover::{find_layout_files, find_source_files_unconstrained};
+use crate::indexer::LayoutCacheEntry;
 use crate::parser::parse_by_extension;
 use crate::path_util::to_forward_slash;
 use crate::resolver::symbols_from_uri_as_completions_pub;
@@ -1068,6 +1069,48 @@ impl Indexer {
         self.bare_names_dirty.store(true, Ordering::Release);
 
         Some(self.with_classified_source_set(uri.as_str(), Arc::new(result.data)))
+    }
+
+    /// Index all layout XML files discovered under `root`, using optional cache entries.
+    pub(crate) fn index_workspace_layouts(
+        &self,
+        root: &Path,
+        cached_layouts: Option<&HashMap<String, LayoutCacheEntry>>,
+    ) {
+        let matcher = self
+            .ignore_matcher
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let paths = find_layout_files(root, matcher.as_deref());
+        for path in paths {
+            let Ok(uri) = Url::from_file_path(&path) else {
+                continue;
+            };
+            let uri_string = uri.to_string();
+            let path_string = path.to_string_lossy().to_string();
+
+            if let Some(cache) = cached_layouts {
+                if let Some(entry) = cache.get(&path_string) {
+                    let meta = std::fs::metadata(&path).ok();
+                    let mtime = meta
+                        .as_ref()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0);
+                    let file_size = meta.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
+                    if entry.mtime_secs == mtime && entry.file_size == file_size {
+                        self.layouts.insert(uri_string, Arc::clone(&entry.data));
+                        continue;
+                    }
+                }
+            }
+
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                self.index_layout_content(&uri, &content);
+            }
+        }
     }
 
     /// Spawn background tasks to pre-warm the completion cache for all types

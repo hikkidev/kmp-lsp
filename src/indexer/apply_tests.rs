@@ -192,6 +192,7 @@ fn apply_workspace_result_includes_cached_files_issue_apply() {
         workspace_root: std::path::PathBuf::from("/"),
         aborted: false,
         complete_scan: true,
+        cached_layouts: std::collections::HashMap::new(),
     };
 
     let idx = Indexer::new();
@@ -221,6 +222,7 @@ fn apply_workspace_result_clears_stale_workspace_issue_apply() {
         workspace_root: std::path::PathBuf::from("/workspace_a"),
         aborted: false,
         complete_scan: true,
+        cached_layouts: std::collections::HashMap::new(),
     });
     assert!(
         idx.definitions.contains_key("ClassA"),
@@ -235,6 +237,7 @@ fn apply_workspace_result_clears_stale_workspace_issue_apply() {
         workspace_root: std::path::PathBuf::from("/workspace_b"),
         aborted: false,
         complete_scan: true,
+        cached_layouts: std::collections::HashMap::new(),
     });
 
     assert!(
@@ -275,6 +278,7 @@ fn apply_workspace_result_mixed_cache_and_parsed_issue_apply() {
         workspace_root: std::path::PathBuf::from("/"),
         aborted: false,
         complete_scan: true,
+        cached_layouts: std::collections::HashMap::new(),
     });
 
     assert!(

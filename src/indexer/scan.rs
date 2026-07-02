@@ -259,6 +259,7 @@ fn aborted_scan_result(root: &Path) -> WorkspaceIndexResult {
         workspace_root: root.to_path_buf(),
         aborted: true,
         complete_scan: false,
+        cached_layouts: std::collections::HashMap::new(),
     }
 }
 
@@ -564,6 +565,7 @@ fn build_workspace_result(
         workspace_root: root.to_path_buf(),
         aborted: false,
         complete_scan: !discovered.truncated,
+        cached_layouts: std::collections::HashMap::new(),
     }
 }
 
@@ -923,9 +925,23 @@ impl Indexer {
         let apply_ok =
             tokio::task::spawn_blocking(move || idx.apply_workspace_result(&result_for_apply))
                 .await
-                .map_err(|e| log::error!("apply_workspace_result panicked: {e}"))
+                .map_err(|error| log::error!("apply_workspace_result panicked: {error}"))
                 .is_ok();
         if apply_ok {
+            let cached_layouts = result.cached_layouts.clone();
+            let layout_cache = if cached_layouts.is_empty() {
+                None
+            } else {
+                Some(cached_layouts)
+            };
+            let root_for_layouts = root.clone();
+            let indexer_for_layouts = Arc::clone(&self);
+            tokio::task::spawn_blocking(move || {
+                indexer_for_layouts
+                    .index_workspace_layouts(&root_for_layouts, layout_cache.as_ref());
+            })
+            .await
+            .ok();
             // Always save when a complete scan ran — this trims deleted-file entries from
             // the on-disk cache even when files_parsed == 0 (all cache hits).  Skip only
             // for partial / truncated scans where nothing new was parsed.
@@ -1028,7 +1044,7 @@ impl Indexer {
             return (aborted_scan_result(root), Some(guard));
         }
 
-        let result = build_workspace_result(
+        let mut result = build_workspace_result(
             root,
             &discovered,
             cached_results,
@@ -1036,6 +1052,9 @@ impl Indexer {
             parse_count,
             cache_hits,
         );
+        if let Some(ref disk_cache) = cache {
+            result.cached_layouts = disk_cache.layouts.clone();
+        }
         write_indexing_done_status(
             root,
             result.stats.files_parsed,
@@ -1061,6 +1080,7 @@ impl Indexer {
             &self.files,
             &self.content_hashes,
             &self.library_uris,
+            &self.layouts,
             complete_scan,
             allow_shrink,
         );

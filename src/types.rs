@@ -406,6 +406,8 @@ pub(crate) struct WorkspaceIndexResult {
     /// Written into the on-disk cache so warm-manifest mode is only used when the
     /// cache is a complete snapshot of the workspace.
     pub complete_scan: bool,
+    /// Layout side-index entries from the on-disk cache at scan start.
+    pub cached_layouts: std::collections::HashMap<String, crate::indexer::LayoutCacheEntry>,
 }
 
 #[cfg(test)]

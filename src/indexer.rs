@@ -64,6 +64,9 @@ pub(crate) use self::enrich::EnrichmentHandle;
 
 mod discover;
 
+mod layout;
+pub(crate) use self::layout::{is_layout_xml_path, LayoutCacheEntry, LayoutFileData};
+
 mod scan;
 pub(crate) const MAX_FILES_UNLIMITED: usize = usize::MAX;
 
@@ -299,6 +302,8 @@ pub(crate) struct Indexer {
     /// one-package-per-jar inference. Empty string where the sidecar gave no package.
     /// NOT cleared by `reset_index_state()`.
     pub(crate) jar_symbol_packages: DashMap<String, Vec<String>>,
+    /// URI string → parsed Android layout XML metadata (ViewBinding side index).
+    pub(crate) layouts: DashMap<String, Arc<LayoutFileData>>,
 }
 
 /// Cap on how many same-named definitions a receiver-less by-name inference lookup
@@ -560,6 +565,7 @@ impl Indexer {
             jar_uri_to_defs: DashMap::new(),
             jar_symbol_packages: DashMap::new(),
             extension_by_receiver: DashMap::new(),
+            layouts: DashMap::new(),
         }
     }
 
@@ -677,6 +683,7 @@ impl Indexer {
         self.completion_epoch.fetch_add(1, Ordering::Release);
         self.sig_cache.clear();
         self.sig_fast_cache.clear();
+        self.layouts.clear();
         // Clear enrichment dedup so symbols are re-attempted after reindex.
         if let Ok(handle) = self.enrichment.read() {
             handle.clear();
@@ -905,6 +912,16 @@ impl Indexer {
 
     pub(crate) fn remove_indexed_file(&self, uri: &Url) {
         self.files.remove(uri.as_str());
+    }
+
+    pub(crate) fn remove_layout(&self, uri: &Url) {
+        self.layouts.remove(uri.as_str());
+    }
+
+    /// Read accessor for the layout side index; used by ViewBinding navigation (PR 4+).
+    #[allow(dead_code)]
+    pub(crate) fn layout_for_uri(&self, uri: &str) -> Option<Arc<LayoutFileData>> {
+        self.layouts.get(uri).map(|entry| Arc::clone(entry.value()))
     }
 
     /// Bust the completion cache so the next request recomputes with the latest

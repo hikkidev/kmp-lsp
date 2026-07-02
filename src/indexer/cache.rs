@@ -18,13 +18,18 @@ use tower_lsp::lsp_types::Url;
 
 use crate::types::{FileData, FileIndexResult, Visibility};
 
+use super::layout::LayoutFileData;
+
+pub(crate) use super::layout::LayoutCacheEntry;
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Bump when the serialized format changes; invalidates any older cache files.
 /// v28: added `SymbolEntry.deprecated` (forces reparse so it populates).
 /// v29: recover interface symbols mis-parsed via qualified/array annotations
 ///      (forces reparse so the recovered symbols populate).
-pub(crate) const CACHE_VERSION: u32 = 29;
+/// v30: persist Android layout side index entries.
+pub(crate) const CACHE_VERSION: u32 = 30;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -66,6 +71,9 @@ pub(super) struct IndexCache {
     pub(super) complete_scan: bool,
     /// Absolute path string → per-file cached data.
     pub(super) entries: HashMap<String, FileCacheEntry>,
+    /// Absolute path string → cached layout side-index data.
+    #[serde(default)]
+    pub(super) layouts: HashMap<String, LayoutCacheEntry>,
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -208,6 +216,7 @@ pub(super) fn save_cache(
     files: &DashMap<String, Arc<FileData>>,
     content_hashes: &DashMap<String, u64>,
     library_uris: &DashSet<String>,
+    layouts: &DashMap<String, Arc<LayoutFileData>>,
     complete_scan: bool,
     allow_shrink: bool,
 ) {
@@ -255,10 +264,38 @@ pub(super) fn save_cache(
         }
     }
 
+    let mut layout_entries: HashMap<String, LayoutCacheEntry> = HashMap::new();
+    for layout_ref in layouts.iter() {
+        let uri_string = layout_ref.key();
+        let data = layout_ref.value();
+        if let Ok(url) = uri_string.parse::<Url>() {
+            if let Ok(path) = url.to_file_path() {
+                let meta = std::fs::metadata(&path);
+                let mtime = meta
+                    .as_ref()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+                let file_size = meta.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
+                layout_entries.insert(
+                    path.to_string_lossy().to_string(),
+                    LayoutCacheEntry {
+                        mtime_secs: mtime,
+                        file_size,
+                        data: Arc::clone(data),
+                    },
+                );
+            }
+        }
+    }
+
     let cache = IndexCache {
         version: CACHE_VERSION,
         complete_scan,
         entries,
+        layouts: layout_entries,
     };
     match bincode::serialize(&cache) {
         Ok(bytes) => {
@@ -620,6 +657,7 @@ fn write_library_chunks(dir: &Path, entries: Vec<(String, FileCacheEntry)>) -> O
             version: CACHE_VERSION,
             complete_scan: true,
             entries: chunk_entries,
+            layouts: HashMap::new(),
         };
         match bincode::serialize(&cache) {
             Ok(bytes) => {
