@@ -102,13 +102,16 @@ or is needed.
 ### References: binding fields
 
 `textDocument/references` covers **all Kotlin usages** of a binding field:
-qualified (`binding.title`), and contextual receivers (`this`, `it`, `apply`,
-`with`, `run`, …). Requesting references from the XML side (`@+id/field`)
-returns the same result set.
+qualified (`binding.title`), explicit contextual receivers (`this`, `it`), and
+bare implicit-`this` members inside `apply` / `with` / `run` / `also`.
+Requesting references from the XML side (`@+id/field`) returns the same result
+set.
 
 Precision policy: **prefer false negatives over false positives.** A text
 candidate whose receiver cannot be positively resolved to the matching
-Binding class is dropped, not included speculatively.
+Binding class is dropped, not included speculatively. A candidate that a nearer
+local declaration shadows (see *Contextual receiver resolution*) is likewise
+excluded.
 
 ### Hover
 
@@ -133,7 +136,13 @@ emitted in XML files.**
 |---|---|---|---|
 | Layout XML exists, no generated Binding.java found | the `import *.databinding.*Binding` line | Warning | "ViewBinding class not generated — build the project" |
 | Layout root tag has `tools:viewBindingIgnore="true"` | the import line | Warning | "layout opts out of ViewBinding (`tools:viewBindingIgnore`)" — distinct from the build-required message |
-| `binding.field` resolves in generated Java but the id no longer exists in any live layout variant | the specific stale `binding.field` usage | Information | "field comes from a stale build; id no longer in layout" |
+| a binding field usage resolves in generated Java but the id no longer exists in any live layout variant | the specific stale field usage | Information | "field comes from a stale build; id no longer in layout" |
+
+The stale-field diagnostic covers the same usage forms as navigation:
+qualified `binding.field` and bare implicit-`this` members inside
+`with` / `apply` / `run` / `also`. It skips declaration names and any usage a
+nearer local declaration shadows, so a local `val title` inside
+`with(binding) { … }` is never reported as stale.
 
 Definition/hover/references requests themselves stay **silently empty** when
 unresolvable — exactly like any other unresolved symbol. The diagnostics
@@ -162,6 +171,12 @@ workspace's `tree-sitter = "0.22"`; `0.7.0` moved to the 0.23 ABI). This is
 consistent with the all-tree-sitter codebase: positions, incremental reparse,
 and the existing `NodeExt` / cursor-API traversal conventions apply. XML node
 kind constants live in `src/queries.rs` like every other grammar's.
+
+XML cursor lookups convert the LSP `position.character` (a UTF-16 code-unit
+offset) to a byte offset with `utf16_col_to_byte` before building the
+tree-sitter `Point`, exactly as the Kotlin paths do — `Point.column` is a byte
+offset, so a line with a multi-byte character before the cursor would
+otherwise resolve the wrong node.
 
 ### Layout side index (new data model)
 
@@ -259,14 +274,28 @@ assigned without an `R.id` (AGP emits `rootView` directly). When remapping
 that field, the target is recovered **by field name** from the layout side
 index rather than by id lookup.
 
-### Contextual receiver resolution — no new work
+### Contextual receiver resolution
 
-`this` / `apply` / `it` / `with` receiver typing requires **zero new code**.
-The existing inference machinery in `src/indexer/infer/` —
-`RECEIVER_THIS_FNS` in `lambda.rs`, `it_this.rs`, `receiver.rs`,
-`cst_lambda.rs` — already types scope-function receivers. Binding fields are
-ordinary Java symbols in the index, and the remap is post-resolution, so
-contextual access falls out for free.
+Explicit contextual receivers — `this.field` / `it.field` inside
+`apply` / `with` / `run` / `also` — reuse the existing inference machinery in
+`src/indexer/infer/` (`RECEIVER_THIS_FNS` in `lambda.rs`, `it_this.rs`,
+`receiver.rs`, `cst_lambda.rs`). Binding fields are ordinary Java symbols in
+the index and the remap is post-resolution, so those forms fall out for free.
+
+**Bare implicit-`this` members** (`with(binding) { title }`, no `this.`
+prefix) are handled explicitly in `CursorContext::build`
+(`src/backend/cursor.rs`): a bare lowercase identifier inside a receiver lambda
+is treated as `this.<name>` only after ruling out closer bindings.
+
+**Local shadowing is normative.** Kotlin resolves a bare name to the nearest
+in-scope `val`/`var`, function parameter, or lambda parameter *before* an
+implicit receiver, so a local declaration that shadows a binding field wins.
+`Indexer::name_shadowed_by_local_declaration` (`src/indexer/scope.rs`) performs
+this CST scope walk, bounded by the enclosing function and by type bodies
+(class/object/enum members and top-level declarations never shadow an inner
+receiver-lambda member). Navigation, reference verification, and the staleness
+diagnostic all consult it, so a shadowed local is never mistaken for a binding
+field.
 
 ### Freshness
 
@@ -294,6 +323,14 @@ When generated `*Binding.java` files appear or change, it re-triggers the
 additive binding discovery for that module, so the build-required diagnostic
 **self-clears** after a build without a manual reindex. See PR 3 in the
 implementation plan.
+
+**Registration hand-off.** The real watcher handle is installed in
+`initialized`, but the workspace scan kicked off during `initialize` already
+runs binding discovery against the earlier **noop** handle, whose registrations
+are dropped. To close that gap, `set_databinding_watcher_handle`
+(`src/indexer/binding_discovery.rs`) re-registers every already-discovered
+module root against the incoming handle, so modules discovered before the
+watcher was installed are still polled.
 
 > **Reality note — watcher registration.** The design session originally
 > assumed registering the two watch patterns via dynamic

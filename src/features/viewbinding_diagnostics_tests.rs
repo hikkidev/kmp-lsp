@@ -152,6 +152,81 @@ fn stale_field_diagnostic_when_id_removed_from_layout() {
 }
 
 #[test]
+fn stale_field_diagnostic_covers_bare_receiver_scope_member() {
+    let fixture = DiagnosticsFixture::build(FOO_BAR_LAYOUT, true);
+    let bare_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/BareUsage.kt");
+    fs::create_dir_all(bare_path.parent().unwrap()).expect("mkdir bare usage");
+    // Bare `oldField` inside `with(binding)` uses implicit `this` — its id was
+    // removed from the layout, so it must be flagged just like `binding.oldField`.
+    // `title` is still live and must stay silent.
+    let bare_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+fun render(binding: FooBarBinding) {
+    with(binding) {
+        title
+        oldField
+    }
+}
+"#;
+    fs::write(&bare_path, bare_source).expect("write bare usage");
+    let bare_uri = Url::from_file_path(&bare_path).expect("bare uri");
+    fixture.indexer.index_content(&bare_uri, bare_source);
+    fixture.indexer.set_live_lines(&bare_uri, bare_source);
+    fixture.indexer.store_live_tree(&bare_uri, bare_source);
+
+    let document = fixture.indexer.live_doc(&bare_uri).expect("live doc");
+    let diags = stale_binding_field_diagnostics(&fixture.indexer, &bare_uri, &document);
+
+    let stale = diags
+        .iter()
+        .find(|diag| diag.message.contains("oldField"))
+        .expect("bare stale field `oldField` inside with(binding) must be flagged");
+    assert_eq!(stale.severity, Some(DiagnosticSeverity::INFORMATION));
+    assert!(
+        !diags.iter().any(|diag| diag.message.contains("title")),
+        "live field `title` must not be flagged stale: {diags:?}"
+    );
+}
+
+#[test]
+fn stale_field_diagnostic_skipped_for_shadowed_bare_local() {
+    let fixture = DiagnosticsFixture::build(FOO_BAR_LAYOUT, true);
+    let shadow_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/ShadowUsage.kt");
+    fs::create_dir_all(shadow_path.parent().unwrap()).expect("mkdir shadow usage");
+    // A local `val oldField` shadows the binding field; the bare usage is the
+    // local, so no stale-build diagnostic should fire.
+    let shadow_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+fun render(binding: FooBarBinding) {
+    with(binding) {
+        val oldField = "local"
+        println(oldField)
+    }
+}
+"#;
+    fs::write(&shadow_path, shadow_source).expect("write shadow usage");
+    let shadow_uri = Url::from_file_path(&shadow_path).expect("shadow uri");
+    fixture.indexer.index_content(&shadow_uri, shadow_source);
+    fixture.indexer.set_live_lines(&shadow_uri, shadow_source);
+    fixture.indexer.store_live_tree(&shadow_uri, shadow_source);
+
+    let document = fixture.indexer.live_doc(&shadow_uri).expect("live doc");
+    let diags = stale_binding_field_diagnostics(&fixture.indexer, &shadow_uri, &document);
+    assert!(
+        !diags.iter().any(|diag| diag.message.contains("oldField")),
+        "a local val shadowing a binding field must not be flagged stale: {diags:?}"
+    );
+}
+
+#[test]
 fn stale_field_diagnostic_skipped_when_id_present() {
     let fixture = DiagnosticsFixture::build(FOO_BAR_LAYOUT, true);
     let document = fixture

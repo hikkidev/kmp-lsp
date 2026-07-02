@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::backend::databinding_watcher::spawn_databinding_watcher_with_interval;
-use crate::indexer::{DatabindingWatcherHandle, Indexer};
+use crate::indexer::{DatabindingWatcherHandle, DatabindingWatcherState, Indexer};
 use crate::workspace::Event;
 
 const SAMPLE_BINDING_JAVA: &str = r#"package com.example.app.databinding;
@@ -80,6 +80,33 @@ async fn watch_module_is_idempotent() {
     assert_eq!(
         parse_count_after_first, parse_count_after_second,
         "duplicate watch_module registration must not trigger extra discovery"
+    );
+}
+
+#[tokio::test]
+async fn set_watcher_handle_registers_modules_discovered_before_install() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    write_binding_java(&binding_path(&module_root), SAMPLE_BINDING_JAVA);
+
+    let indexer = Arc::new(Indexer::new());
+
+    // Discovery runs against the default noop handle — exactly what happens
+    // during early workspace indexing, before `initialized` installs the real
+    // watcher. The module is discovered but not yet in any watcher's watched set.
+    indexer.index_generated_bindings(&module_root);
+
+    let state = Arc::new(DatabindingWatcherState::new());
+    assert!(
+        state.registered_module_roots().is_empty(),
+        "a fresh watcher state must start with no registered module roots"
+    );
+
+    indexer.set_databinding_watcher_handle(DatabindingWatcherHandle::new(Arc::clone(&state)));
+
+    assert!(
+        state.registered_module_roots().contains(&module_root),
+        "a module discovered before the handle was installed must be re-registered on install"
     );
 }
 

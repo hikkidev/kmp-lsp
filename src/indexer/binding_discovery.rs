@@ -396,6 +396,13 @@ impl super::Indexer {
     /// Idempotent and additive — safe to call repeatedly.
     ///
     pub(crate) fn set_databinding_watcher_handle(&self, handle: DatabindingWatcherHandle) {
+        // Modules discovered during early workspace indexing ran
+        // `index_generated_bindings` against the noop handle, so their roots
+        // never entered a poll watcher's watched set. Re-register them here so
+        // the real watcher polls modules discovered before it was installed.
+        for module in self.generated_bindings.iter() {
+            handle.watch_module(module.key());
+        }
         if let Ok(mut guard) = self.databinding_watcher.write() {
             *guard = handle;
         }

@@ -1202,3 +1202,92 @@ fn binding_implementation_helper_filters_non_generated_classes() {
     let response = find_binding_implementation(&indexer, &context, &uri, Position::new(0, 7));
     assert!(response.is_none());
 }
+
+/// UTF-16 column of the first char of `needle` in `source` (LSP position). The
+/// fixture's byte-based `position_in` is wrong for lines with multi-byte chars.
+fn utf16_position_in(source: &str, needle: &str) -> Position {
+    let offset = source.find(needle).expect("needle in source");
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (index, ch) in source.char_indices() {
+        if index == offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += ch.len_utf16() as u32;
+        }
+    }
+    Position { line, character }
+}
+
+#[tokio::test]
+async fn bare_scope_access_respects_local_shadowing() {
+    let fixture = ViewBindingFixture::build();
+    let shadow_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/Shadow.kt");
+    fs::create_dir_all(shadow_path.parent().unwrap()).expect("mkdir shadow");
+    // `title` is both a binding field (@+id/title) AND a local val here. Kotlin
+    // resolves the bare name to the nearer local, so navigation must NOT remap
+    // to the layout.
+    let shadow_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+fun shadowed(binding: FooBarBinding) {
+    with(binding) {
+        val title = "local shadow"
+        println(title)
+    }
+}
+"#;
+    fs::write(&shadow_path, shadow_source).expect("write shadow");
+    let shadow_uri = Url::from_file_path(&shadow_path).expect("shadow uri");
+    fixture.indexer.index_content(&shadow_uri, shadow_source);
+    fixture.indexer.set_live_lines(&shadow_uri, shadow_source);
+    fixture.indexer.store_live_tree(&shadow_uri, shadow_source);
+
+    let position =
+        ViewBindingFixture::position_on_word_in_line(shadow_source, "println(title)", "title");
+    let context =
+        CursorContext::build(&fixture.indexer, &shadow_uri, position).expect("cursor context");
+
+    assert!(
+        context.qualifier.as_deref() != Some("this"),
+        "local val must shadow the binding member; got qualifier {:?}",
+        context.qualifier
+    );
+    assert!(
+        resolve_expected_binding_class(&fixture.indexer, &shadow_uri, position, &context).is_none(),
+        "a local `val title` must not resolve to a binding class"
+    );
+
+    let response = find_definition(&context, &*fixture.indexer, &shadow_uri, position).await;
+    let locations = response_locations(response);
+    assert!(
+        locations
+            .iter()
+            .all(|location| uri_path_string(location) != "foo_bar.xml"),
+        "shadowed local `title` must not navigate to the layout: {locations:?}"
+    );
+}
+
+#[test]
+fn xml_view_id_lookup_maps_utf16_column_to_bytes() {
+    // A non-ASCII attribute value precedes `@+id/title` on the same line, so the
+    // UTF-16 cursor column differs from the byte column tree-sitter expects.
+    let content = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android">
+    <TextView android:contentDescription="αααααααααα" android:id="@+id/title" />
+</LinearLayout>
+"#;
+    let position = utf16_position_in(content, "id/title");
+    assert_eq!(
+        super::view_id_reference_at_position(content, position),
+        Some("title".to_string()),
+        "UTF-16 column must be converted to a byte column before the tree-sitter lookup"
+    );
+}

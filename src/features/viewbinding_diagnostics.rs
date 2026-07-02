@@ -9,11 +9,17 @@ use crate::indexer::{
     import_triggers_binding_discovery, layout_name_for_binding_class, module_root_for_source_file,
     Indexer, NodeExt,
 };
-use crate::queries::{KIND_NAV_EXPR, KIND_SIMPLE_IDENT};
+use crate::queries::{
+    KIND_CALL_EXPR, KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_PARAMETER, KIND_SIMPLE_IDENT,
+    KIND_VAR_DECL,
+};
 use crate::Language;
 use crate::StrExt;
 
-use super::viewbinding::{binding_class_for_field_access, view_id_live_for_binding_field};
+use super::viewbinding::{
+    binding_class_for_bare_field_access, binding_class_for_field_access,
+    view_id_live_for_binding_field,
+};
 
 const DIAGNOSTIC_SOURCE: &str = "kmp-lsp";
 
@@ -123,10 +129,18 @@ fn collect_stale_binding_fields(
     uri: &Url,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if node.kind() == KIND_NAV_EXPR {
-        if let Some(diagnostic) = check_stale_binding_field(&node, bytes, index, uri) {
-            diagnostics.push(diagnostic);
+    match node.kind() {
+        KIND_NAV_EXPR => {
+            if let Some(diagnostic) = check_stale_binding_field(&node, bytes, index, uri) {
+                diagnostics.push(diagnostic);
+            }
         }
+        KIND_SIMPLE_IDENT => {
+            if let Some(diagnostic) = check_stale_bare_binding_field(&node, bytes, index, uri) {
+                diagnostics.push(diagnostic);
+            }
+        }
+        _ => {}
     }
 
     let mut cursor = node.walk();
@@ -162,21 +176,79 @@ fn check_stale_binding_field(
     }
 
     let binding_class = binding_class_for_field_access(index, &receiver_node, bytes, uri)?;
+    stale_binding_field_diagnostic(
+        index,
+        uri,
+        &binding_class,
+        &field_name,
+        node_to_range(field_node),
+    )
+}
+
+/// Staleness diagnostic for a bare implicit-`this` binding field, e.g. `title`
+/// inside `with(binding) { title }`. Consistent with the navigation and
+/// reference support for bare receiver-scope members.
+fn check_stale_bare_binding_field(
+    identifier_node: &tree_sitter::Node,
+    bytes: &[u8],
+    index: &Indexer,
+    uri: &Url,
+) -> Option<Diagnostic> {
+    if is_non_reference_identifier(identifier_node) {
+        return None;
+    }
+    let field_name = identifier_node.utf8_text_owned(bytes)?;
+    if field_name.starts_with_uppercase() {
+        return None;
+    }
+    let binding_class =
+        binding_class_for_bare_field_access(index, identifier_node, &field_name, bytes, uri)?;
+    stale_binding_field_diagnostic(
+        index,
+        uri,
+        &binding_class,
+        &field_name,
+        node_to_range(*identifier_node),
+    )
+}
+
+/// True when `node` (a `simple_identifier`) is not a standalone value
+/// reference: the receiver or `.member` of a navigation expression, a call
+/// callee, or the bound name of a declaration (val/var/lambda param/function
+/// param). None of these is a bare implicit-`this` member usage.
+fn is_non_reference_identifier(node: &tree_sitter::Node) -> bool {
+    node.parent().is_some_and(|parent| {
+        matches!(
+            parent.kind(),
+            KIND_NAV_EXPR | KIND_NAV_SUFFIX | KIND_CALL_EXPR | KIND_VAR_DECL | KIND_PARAMETER
+        )
+    })
+}
+
+/// Shared staleness check: the field exists in the module's generated binding
+/// but its id is gone from every live layout variant.
+fn stale_binding_field_diagnostic(
+    index: &Indexer,
+    uri: &Url,
+    binding_class: &str,
+    field_name: &str,
+    range: Range,
+) -> Option<Diagnostic> {
     let module_root = uri
         .to_file_path()
         .ok()
         .and_then(|path| module_root_for_source_file(&path))?;
-    let layout_name = layout_name_for_binding_class(&binding_class)?;
+    let layout_name = layout_name_for_binding_class(binding_class)?;
 
-    if !binding_field_exists(index, &module_root, &binding_class, &field_name) {
+    if !binding_field_exists(index, &module_root, binding_class, field_name) {
         return None;
     }
-    if view_id_live_for_binding_field(index, &module_root, &layout_name, &field_name) {
+    if view_id_live_for_binding_field(index, &module_root, &layout_name, field_name) {
         return None;
     }
 
     Some(Diagnostic {
-        range: node_to_range(field_node),
+        range,
         severity: Some(DiagnosticSeverity::INFORMATION),
         source: Some(DIAGNOSTIC_SOURCE.into()),
         message: format!("Field `{field_name}` comes from a stale build; id no longer in layout"),

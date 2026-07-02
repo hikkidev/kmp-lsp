@@ -11,7 +11,7 @@ use crate::backend::format::format_contextual_hover;
 use crate::features::definition::locs_to_opt_response;
 use crate::features::references::find_references_with_qualifier;
 use crate::features::traits::{DocumentAccess, SymbolIndex};
-use crate::indexer::live_tree::{lang_for_path, parse_live};
+use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte};
 use crate::indexer::NodeExt;
 use crate::indexer::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
@@ -323,6 +323,22 @@ fn layout_content_for_uri(index: &impl DocumentAccess, uri: &Url) -> Option<Stri
     std::fs::read_to_string(path).ok()
 }
 
+/// Convert an LSP `Position` (UTF-16 column) into a tree-sitter `Point`
+/// (byte column) for `content`. tree-sitter `Point.column` is a byte offset, so
+/// passing `position.character` unconverted misplaces the cursor on any line
+/// with a multi-byte character before it — matching the Kotlin paths that
+/// already convert via `utf16_col_to_byte`.
+fn xml_point_for_position(content: &str, position: Position) -> tree_sitter::Point {
+    let line_text = content
+        .split('\n')
+        .nth(position.line as usize)
+        .unwrap_or("");
+    tree_sitter::Point {
+        row: position.line as usize,
+        column: utf16_col_to_byte(line_text, position.character as usize),
+    }
+}
+
 fn view_id_reference_at_position(content: &str, position: Position) -> Option<String> {
     XML_NAV_PARSER.with(|cell| {
         let tree = cell.borrow_mut().parse(content, None)?;
@@ -330,10 +346,7 @@ fn view_id_reference_at_position(content: &str, position: Position) -> Option<St
         if root.kind() != KIND_XML_DOCUMENT {
             return None;
         }
-        let target_point = tree_sitter::Point {
-            row: position.line as usize,
-            column: position.character as usize,
-        };
+        let target_point = xml_point_for_position(content, position);
         let node = root.descendant_for_point_range(target_point, target_point)?;
         if node.kind() != KIND_XML_ATT_VALUE {
             return None;
@@ -351,10 +364,7 @@ fn element_tag_name_at_position(content: &str, position: Position) -> Option<Str
         if root.kind() != KIND_XML_DOCUMENT {
             return None;
         }
-        let target_point = tree_sitter::Point {
-            row: position.line as usize,
-            column: position.character as usize,
-        };
+        let target_point = xml_point_for_position(content, position);
         let mut node = root.descendant_for_point_range(target_point, target_point)?;
         let bytes = content.as_bytes();
         loop {
@@ -746,6 +756,16 @@ fn implicit_receiver_type_for_bare_field(
     if node.utf8_text_owned(bytes).as_deref() != Some(field_name) {
         return None;
     }
+    // A local val/var/param named `field_name` shadows the binding member, so a
+    // bare usage here is not a binding-field reference.
+    if index.name_shadowed_by_local_declaration(
+        &location.uri,
+        location.range.start.line as usize,
+        location.range.start.character as usize,
+        field_name,
+    ) {
+        return None;
+    }
     let lines = index.mem_lines_for(location.uri.as_str())?;
     let this_context = find_this_context_in_lines(
         &lines,
@@ -973,6 +993,41 @@ pub(crate) fn binding_class_for_field_access(
     uri: &Url,
 ) -> Option<String> {
     let receiver_type = infer_receiver_type_for_node(index, receiver_node, bytes, uri)?;
+    binding_class_from_receiver_type(&receiver_type)
+}
+
+/// Binding class of the implicit `this` receiver at a bare member usage
+/// (`title` inside `with(binding) { title }`). Returns `None` when the bare name
+/// is not an implicit binding-field access — including when a local
+/// declaration shadows it. The bare-member counterpart of
+/// `binding_class_for_field_access`.
+pub(crate) fn binding_class_for_bare_field_access(
+    index: &Indexer,
+    identifier_node: &Node<'_>,
+    field_name: &str,
+    bytes: &[u8],
+    uri: &Url,
+) -> Option<String> {
+    let start = identifier_node.start_position();
+    let line_start_offsets = line_starts(bytes);
+    let utf16_column = ts_byte_col_to_utf16(bytes, &line_start_offsets, start.row, start.column);
+    if index.name_shadowed_by_local_declaration(uri, start.row, utf16_column, field_name) {
+        return None;
+    }
+    let lines = index.mem_lines_for(uri.as_str())?;
+    let this_context = find_this_context_in_lines(
+        &lines,
+        CursorPos {
+            line: start.row,
+            utf16_col: utf16_column,
+        },
+        index,
+        uri,
+    );
+    let receiver_type = match this_context {
+        ThisContext::Resolved(resolved_type) => ReceiverType::from_raw(resolved_type),
+        ThisContext::InsideReceiver | ThisContext::NotFound => return None,
+    };
     binding_class_from_receiver_type(&receiver_type)
 }
 

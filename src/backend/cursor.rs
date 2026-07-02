@@ -74,7 +74,7 @@ impl CursorContext {
                 .next()
                 .is_some_and(|character| character.is_lowercase())
         {
-            implicit_receiver_type_for_bare_member(indexer, uri, line, col)
+            implicit_receiver_type_for_bare_member(indexer, uri, line, col, &word)
         } else {
             None
         };
@@ -125,12 +125,20 @@ impl CursorContext {
 
 /// Bare member access inside a receiver lambda (`with(binding) { title }`,
 /// `binding.apply { title }`) uses implicit `this` — same as explicit `this.title`.
+///
+/// A nearer local declaration (val/var/param/lambda param) named `word` shadows
+/// the implicit receiver member, so bail out in that case: Kotlin would resolve
+/// the bare name to the local, not to `this.word`.
 fn implicit_receiver_type_for_bare_member(
     indexer: &Indexer,
     uri: &Url,
     line: usize,
     col: usize,
+    word: &str,
 ) -> Option<ReceiverType> {
+    if indexer.name_shadowed_by_local_declaration(uri, line, col, word) {
+        return None;
+    }
     let lines = indexer.mem_lines_for(uri.as_str())?;
     let this_context = find_this_context_in_lines(
         &lines,

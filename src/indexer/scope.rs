@@ -13,8 +13,9 @@ use super::{
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
 use crate::queries::{
-    KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT,
-    KIND_OBJECT_DECL,
+    KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_ENUM_CLASS_BODY, KIND_FUN_DECL,
+    KIND_FUN_VALUE_PARAMS, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_OBJECT_DECL, KIND_PARAMETER,
+    KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE, KIND_VAR_DECL,
 };
 use crate::types::CursorPos;
 use crate::StrExt;
@@ -386,6 +387,81 @@ impl Indexer {
         None
     }
 
+    /// True when `name` at `(line, utf16_column)` is bound by a nearer local
+    /// declaration — a `val`/`var`, a function parameter, or a lambda parameter —
+    /// that shadows any implicit-receiver member of the same name.
+    ///
+    /// Kotlin resolves a bare identifier to an in-scope local before consulting
+    /// an implicit receiver (`with(binding) { … }`, `binding.apply { … }`), so
+    /// callers that treat a bare name as `this.name` must first rule out a
+    /// shadowing local. The walk stops at the enclosing function and at type
+    /// bodies: class/object/enum members and top-level declarations never shadow
+    /// an inner receiver-lambda member (the innermost implicit receiver wins).
+    pub(crate) fn name_shadowed_by_local_declaration(
+        &self,
+        uri: &Url,
+        line: usize,
+        utf16_column: usize,
+        name: &str,
+    ) -> bool {
+        let Some(doc) = self.live_doc_or_parse(uri) else {
+            return false;
+        };
+        let line_text = self
+            .lines_for(uri)
+            .and_then(|lines| lines.get(line).cloned())
+            .unwrap_or_default();
+        let byte_column = utf16_col_to_byte(&line_text, utf16_column);
+        let point = Point {
+            row: line,
+            column: byte_column,
+        };
+        let Some(cursor_node) = doc
+            .tree
+            .root_node()
+            .descendant_for_point_range(point, point)
+        else {
+            return false;
+        };
+        let bytes = doc.bytes.as_slice();
+        let mut node = cursor_node;
+        loop {
+            if node.kind() == KIND_LAMBDA_LIT
+                && node
+                    .lambda_param_names(bytes)
+                    .iter()
+                    .any(|param| param == name)
+            {
+                return true;
+            }
+            if node.kind() == KIND_FUN_DECL {
+                // Parameters bind the innermost non-lambda scope; beyond the
+                // function are members / top-level, so the search ends here.
+                return function_value_parameter_names(node, bytes)
+                    .iter()
+                    .any(|param| param == name);
+            }
+            let Some(parent) = node.parent() else {
+                return false;
+            };
+            let parent_holds_members = matches!(
+                parent.kind(),
+                KIND_CLASS_BODY | KIND_ENUM_CLASS_BODY | KIND_SOURCE_FILE
+            );
+            if parent_holds_members {
+                return false;
+            }
+            let mut previous = node.prev_sibling();
+            while let Some(sibling) = previous {
+                if property_declaration_binds_name(sibling, bytes, name) {
+                    return true;
+                }
+                previous = sibling.prev_sibling();
+            }
+            node = parent;
+        }
+    }
+
     /// Find the name of the innermost enclosing class/interface/object
     /// that contains `row` in the given file.
     ///
@@ -554,6 +630,37 @@ pub(super) fn extract_class_decl_name(line: &str) -> Option<String> {
         return None;
     }
     Some(name)
+}
+
+/// Names declared by a function declaration's value-parameter list.
+fn function_value_parameter_names(
+    function_node: tree_sitter::Node<'_>,
+    bytes: &[u8],
+) -> Vec<String> {
+    let Some(parameters) = function_node.first_child_of_kind(KIND_FUN_VALUE_PARAMS) else {
+        return Vec::new();
+    };
+    parameters
+        .children_of_kind(KIND_PARAMETER)
+        .into_iter()
+        .filter_map(|parameter| parameter.first_child_of_kind(KIND_SIMPLE_IDENT))
+        .filter_map(|identifier| identifier.utf8_text_owned(bytes))
+        .collect()
+}
+
+/// True when `node` is a `val`/`var` declaration whose bound name is `name`.
+fn property_declaration_binds_name(node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    if node.kind() != KIND_PROP_DECL {
+        return false;
+    }
+    let Some(variable_declaration) = node.first_child_of_kind(KIND_VAR_DECL) else {
+        return false;
+    };
+    variable_declaration
+        .first_child_of_kind(KIND_SIMPLE_IDENT)
+        .and_then(|identifier| identifier.utf8_text_owned(bytes))
+        .as_deref()
+        == Some(name)
 }
 
 pub(crate) fn is_id_char(c: char) -> bool {
