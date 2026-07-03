@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
-use crate::indexer::Indexer;
+use crate::indexer::{binding_field_type, Indexer};
 use crate::types::FileData;
 use crate::LinesExt;
 use crate::StrExt;
@@ -566,6 +566,19 @@ pub(crate) fn find_field_type_in_class(
     class_name: &str,
     field_name: &str,
 ) -> Option<String> {
+    if class_name.ends_with("Binding") {
+        if let Some(field_type) = binding_field_type(indexer, None, class_name, field_name) {
+            return Some(field_type);
+        }
+    }
+    find_field_type_in_class_non_binding(indexer, class_name, field_name)
+}
+
+fn find_field_type_in_class_non_binding(
+    indexer: &Indexer,
+    class_name: &str,
+    field_name: &str,
+) -> Option<String> {
     // Per-loc field inference is expensive; the helper scopes to workspace defs and
     // caps the scan so a common class name with many source-JAR defs can't stall.
     indexer
@@ -594,6 +607,13 @@ pub(crate) fn find_field_type_in_class_from(
     field_name: &str,
     from_uri: &Url,
 ) -> Option<String> {
+    if class_name.ends_with("Binding") {
+        if let Some(field_type) =
+            binding_field_type(indexer, Some(from_uri), class_name, field_name)
+        {
+            return Some(field_type);
+        }
+    }
     for location in indexer.resolve_symbol_no_rg(class_name, from_uri) {
         if let Some(field_type) = infer_field_type_raw(indexer, location.uri.as_str(), field_name) {
             return Some(field_type);
@@ -602,7 +622,7 @@ pub(crate) fn find_field_type_in_class_from(
             return Some(field_type);
         }
     }
-    find_field_type_in_class(indexer, class_name, field_name)
+    find_field_type_in_class_non_binding(indexer, class_name, field_name)
 }
 
 // ─── Inherited property type inference ───────────────────────────────────────

@@ -14,10 +14,10 @@ use crate::features::traits::{DocumentAccess, SymbolIndex};
 use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte};
 use crate::indexer::NodeExt;
 use crate::indexer::{
-    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    find_this_context_in_lines, is_layout_xml_path, layout_name_for_binding_class,
-    layout_path_components, module_root_for_generated_file, module_root_for_source_file, IndexRead,
-    Indexer, ThisContext,
+    binding_class_name_for_layout, binding_field_name_to_id, binding_field_type,
+    binding_id_to_field_name, find_this_context_in_lines, is_layout_xml_path,
+    layout_name_for_binding_class, layout_path_components, module_root_for_generated_file,
+    module_root_for_source_file, IndexRead, Indexer, ThisContext,
 };
 use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
@@ -485,17 +485,7 @@ fn strip_xml_quotes(value: &str) -> &str {
     }
 }
 
-// ─── Binding-field hover (PR 5) ──────────────────────────────────────────────
-
-/// Strip package prefix from a type name (`android.widget.TextView` → `TextView`).
-pub(crate) fn short_type_name(type_name: &str) -> String {
-    type_name
-        .trim()
-        .rsplit('.')
-        .next()
-        .unwrap_or(type_name)
-        .to_string()
-}
+pub(crate) use crate::indexer::{java_field_type_from_detail, short_type_name};
 
 /// Kotlin-style hover for a generated binding field: `val title: TextView` / `val title: TextView?`.
 pub(crate) fn format_binding_field_hover(
@@ -507,23 +497,6 @@ pub(crate) fn format_binding_field_hover(
     let rendered_type = if nullable { format!("{short}?") } else { short };
     let signature = format!("val {field_name}: {rendered_type}");
     format_contextual_hover(&signature, ".kt", None)
-}
-
-/// Extract the Java field type from a `SymbolEntry.detail` string.
-pub(crate) fn java_field_type_from_detail(detail: &str, field_name: &str) -> Option<String> {
-    const MODIFIERS: &[&str] = &["public", "private", "protected", "final", "static"];
-    let without_name = detail
-        .trim()
-        .trim_end_matches(';')
-        .strip_suffix(field_name)?
-        .trim();
-    let type_tokens: Vec<&str> = without_name
-        .split_whitespace()
-        .filter(|token| {
-            !MODIFIERS.contains(token) && !token.starts_with('@') && !token.ends_with(';')
-        })
-        .collect();
-    type_tokens.last().map(|token| token.to_string())
 }
 
 /// Kotlin-style hover for a field on a known generated binding class, resolved
@@ -773,31 +746,13 @@ fn binding_class_for_receiver_chain(
     };
     let mut binding_class = binding_class_from_receiver_type(&root_type)?;
     for field in &segments[1..] {
-        let field_type = java_binding_field_type(index, uri, &binding_class, field)?;
+        let field_type = binding_field_type(index, Some(uri), &binding_class, field)?;
         if !field_type.ends_with("Binding") {
             return None;
         }
         binding_class = field_type;
     }
     Some(binding_class)
-}
-
-fn java_binding_field_type(
-    index: &Indexer,
-    uri: &Url,
-    class_name: &str,
-    field_name: &str,
-) -> Option<String> {
-    let binding_file_uri = binding_file_uri_for_source(index, uri, class_name)?;
-    let file_data = index.file_data_for(&binding_file_uri)?;
-    let symbol = file_data.symbols.iter().find(|symbol| {
-        symbol.name == field_name
-            && matches!(
-                symbol.kind,
-                SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
-            )
-    })?;
-    java_field_type_from_detail(&symbol.detail, field_name)
 }
 
 fn receiver_matches_binding_class(
