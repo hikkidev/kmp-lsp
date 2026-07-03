@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 use tower_lsp::Client;
 
+use crate::backend::helpers::is_xml_uri;
 use crate::backend::helpers::syntax_diagnostics;
 use crate::features::call_arg_diagnostics::call_arg_diagnostics;
 use crate::features::code_actions::missing_package_diagnostic;
@@ -13,7 +14,6 @@ use crate::features::nullable_call_diagnostics::nullable_dot_call_diagnostics;
 use crate::features::viewbinding_diagnostics::{
     stale_binding_field_diagnostics, viewbinding_import_diagnostics,
 };
-use crate::indexer::is_layout_xml_path;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::{Indexer, ProgressReporter};
 
@@ -173,6 +173,16 @@ impl DocumentHandler {
                 Ok((data, text)) => (Ok(data), text),
                 Err(_) => (Err(()), String::new()),
             };
+
+            if is_xml_uri(&diagnostics_uri) {
+                if let Some(client) = client {
+                    client
+                        .publish_diagnostics(diagnostics_uri, Vec::new(), None)
+                        .await;
+                }
+                return;
+            }
+
             let mut diagnostics = match index_result {
                 Ok(Some(indexed_file_data)) => syntax_diagnostics(&indexed_file_data.syntax_errors),
                 Ok(None) => diag_indexer
@@ -245,6 +255,13 @@ impl DocumentHandler {
             let indexer = Arc::clone(&self.indexer);
             let client = self.client.clone();
             tokio::task::spawn(async move {
+                if is_xml_uri(&uri) {
+                    if let Some(client) = client {
+                        client.publish_diagnostics(uri, Vec::new(), None).await;
+                    }
+                    return;
+                }
+
                 let syntax_diags = indexer
                     .files
                     .get(uri.as_str())
@@ -397,15 +414,7 @@ fn index_open_file_content(
     uri: &Url,
     content: &str,
 ) -> Option<Arc<crate::types::FileData>> {
-    if uri
-        .to_file_path()
-        .is_ok_and(|path| is_layout_xml_path(&path))
-    {
-        indexer.index_layout_content(uri, content);
-        None
-    } else {
-        indexer.index_content(uri, content)
-    }
+    indexer.index_content(uri, content)
 }
 
 #[cfg(test)]

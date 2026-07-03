@@ -757,3 +757,68 @@ fn classify_source_set_handles_flavored_kmp_test_sets() {
         SourceSet::Test
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  XML files: no Kotlin indexing, layout side index only
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SAMPLE_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+    <TextView android:id="@+id/title" />
+</LinearLayout>
+"#;
+
+/// Documents the bug we guard against: without the XML gate, `index_content`
+/// would parse manifest XML as Kotlin and surface syntax errors.
+#[test]
+fn non_layout_xml_parsed_as_kotlin_has_syntax_errors() {
+    let path = "/proj/app/src/main/AndroidManifest.xml";
+    let content = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+"#;
+    let data = crate::parser::parse_by_extension(path, content);
+    assert!(
+        !data.syntax_errors.is_empty(),
+        "XML parsed as Kotlin must produce syntax errors: {:?}",
+        data.syntax_errors
+    );
+}
+
+#[test]
+fn index_content_skips_non_layout_xml() {
+    let manifest_path = std::env::temp_dir().join("app/src/main/AndroidManifest.xml");
+    let uri = Url::from_file_path(&manifest_path).expect("manifest uri");
+    let content = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+"#;
+
+    let indexer = Indexer::new();
+    let result = indexer.index_content(&uri, content);
+
+    assert!(result.is_none());
+    assert!(
+        !indexer.files.contains_key(uri.as_str()),
+        "non-layout XML must not enter the symbol index"
+    );
+}
+
+#[test]
+fn index_content_routes_layout_xml_to_side_index() {
+    let layout_path = std::env::temp_dir().join("app/src/main/res/layout/foo_bar.xml");
+    let uri = Url::from_file_path(&layout_path).expect("layout uri");
+
+    let indexer = Indexer::new();
+    let result = indexer.index_content(&uri, SAMPLE_LAYOUT);
+
+    assert!(result.is_none());
+    assert!(
+        !indexer.files.contains_key(uri.as_str()),
+        "layout XML must not enter the symbol index"
+    );
+    assert!(
+        indexer.layouts.contains_key(uri.as_str()),
+        "layout XML must be indexed in the layout side index"
+    );
+}

@@ -6,14 +6,13 @@ use tokio::task::JoinHandle;
 use tower_lsp::lsp_types::{TextDocumentContentChangeEvent, Url};
 use tower_lsp::Client;
 
-use crate::backend::helpers::syntax_diagnostics;
+use crate::backend::helpers::{is_xml_uri, syntax_diagnostics};
 use crate::features::call_arg_diagnostics::call_arg_diagnostics;
 use crate::features::fill_when::when_diagnostics;
 use crate::features::nullable_call_diagnostics::nullable_dot_call_diagnostics;
 use crate::features::viewbinding_diagnostics::{
     stale_binding_field_diagnostics, viewbinding_import_diagnostics,
 };
-use crate::indexer::is_layout_xml_path;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::Indexer;
 
@@ -144,6 +143,13 @@ impl FileChangeHandler {
                 return;
             }
 
+            if is_xml_uri(&diagnostics_uri) {
+                client
+                    .publish_diagnostics(diagnostics_uri, Vec::new(), None)
+                    .await;
+                return;
+            }
+
             let (index_result, diagnostics_text) = result.unwrap_or_else(|_| (None, String::new()));
             let index_hit_cache = index_result.is_none();
             log::debug!(
@@ -228,15 +234,7 @@ fn index_layout_or_source_content(
     uri: &Url,
     content: &str,
 ) -> Option<std::sync::Arc<crate::types::FileData>> {
-    if uri
-        .to_file_path()
-        .is_ok_and(|path| is_layout_xml_path(&path))
-    {
-        indexer.index_layout_content(uri, content);
-        None
-    } else {
-        indexer.index_content(uri, content)
-    }
+    indexer.index_content(uri, content)
 }
 
 #[cfg(test)]

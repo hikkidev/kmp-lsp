@@ -1045,6 +1045,16 @@ impl Indexer {
     /// Callers that need to publish diagnostics should read `data.syntax_errors`
     /// from the returned value.
     pub(crate) fn index_content(&self, uri: &Url, content: &str) -> Option<Arc<FileData>> {
+        if crate::backend::helpers::is_xml_uri(uri) {
+            if uri
+                .to_file_path()
+                .is_ok_and(|path| crate::indexer::is_layout_xml_path(&path))
+            {
+                self.index_layout_content(uri, content);
+            }
+            return None;
+        }
+
         // Fast-path: skip re-parse if content hasn't changed since last index.
         let hash = hash_str(content);
         let uri_str = uri.to_string();

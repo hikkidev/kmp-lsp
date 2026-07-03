@@ -344,6 +344,10 @@ fn xml_file_emits_no_diagnostics() {
     let layout_uri =
         Url::from_file_path(fixture.module_root.join("src/main/res/layout/foo_bar.xml"))
             .expect("layout uri");
+    assert!(
+        crate::backend::helpers::is_xml_uri(&layout_uri),
+        "layout URI must be classified as XML"
+    );
     let import_diags = viewbinding_import_diagnostics(&fixture.indexer, &layout_uri);
     assert!(import_diags.is_empty());
 }
