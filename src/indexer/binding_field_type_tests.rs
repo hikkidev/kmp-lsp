@@ -1,7 +1,6 @@
 //! Tests for layout-XML-first ViewBinding field type resolution.
 
 use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tower_lsp::lsp_types::Url;
@@ -83,7 +82,6 @@ public final class FooBarBinding {
 
 struct BindingFieldTypeFixture {
     _temp: tempfile::TempDir,
-    module_root: PathBuf,
     kotlin_uri: Url,
     indexer: Arc<Indexer>,
 }
@@ -150,7 +148,6 @@ class MainActivity {
 
         Self {
             _temp: temp,
-            module_root,
             kotlin_uri,
             indexer,
         }
