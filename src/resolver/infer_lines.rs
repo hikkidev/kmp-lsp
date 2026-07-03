@@ -162,6 +162,8 @@ pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<St
 ///
 /// Also handles delegate-inferred types:
 /// `val foo by lazy { SomeType() }` → `"SomeType"` (single-line only)
+/// `val binding by viewBinding<FooBinding>()` → `"FooBinding"`
+/// `val binding by viewBinding(FooBinding::inflate)` → `"FooBinding"`
 pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Option<String> {
     let pattern = format!("{var_name}:");
 
@@ -221,10 +223,58 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
         }
     }
 
+    // ViewBinding delegate: `by viewBinding<FooBinding>()` or
+    // `by viewBinding(FooBinding::inflate/bind)`.
+    for line in lines {
+        if let Some(binding_type) = infer_view_binding_delegate_type(line, var_name) {
+            return Some(binding_type);
+        }
+    }
+
     // Tertiary scan: assignment-based type inference.
     for line in lines {
         if let Some(t) = infer_from_rhs_assignment(line, var_name) {
             return Some(t);
+        }
+    }
+
+    None
+}
+
+/// Infer a `*Binding` type from a `by viewBinding<…>()` or `by viewBinding(…::inflate/bind)`
+/// property delegate on a single line.
+fn infer_view_binding_delegate_type(line: &str, var_name: &str) -> Option<String> {
+    let delegate_pattern = format!("{var_name} by viewBinding");
+    if !line.contains(&delegate_pattern) {
+        return None;
+    }
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+        return None;
+    }
+    let view_binding_pos = line.find("viewBinding")?;
+    let after_view_binding = &line[view_binding_pos + "viewBinding".len()..];
+    extract_binding_type_from_view_binding_delegate(after_view_binding)
+}
+
+fn extract_binding_type_from_view_binding_delegate(after_view_binding: &str) -> Option<String> {
+    let trimmed = after_view_binding.trim_start();
+
+    if let Some(generic_args) = trimmed.strip_prefix('<') {
+        let type_name = extract_type_with_generics(generic_args);
+        if type_name.ends_with("Binding") && type_name.starts_with_uppercase() {
+            return Some(type_name);
+        }
+    }
+
+    if let Some(inside) = trimmed.strip_prefix('(') {
+        let inside = inside.trim_start();
+        let colon_pos = inside.find("::")?;
+        let before_reference = inside[..colon_pos].trim();
+        let binding_name = before_reference.dotted_ident_prefix();
+        let base = binding_name.last_segment().trim();
+        if base.ends_with("Binding") && base.starts_with_uppercase() {
+            return Some(base.to_owned());
         }
     }
 

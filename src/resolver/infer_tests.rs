@@ -462,3 +462,54 @@ fn inherited_generic_property_preserves_nullable_raw_type() {
         "nullable inherited generic property should preserve ? in raw inference"
     );
 }
+
+#[test]
+fn infer_variable_type_view_binding_generic_delegate() {
+    use crate::indexer::Indexer;
+    use crate::resolver::infer::infer_variable_type_raw;
+
+    let idx = Indexer::new();
+    let uri = test_uri("/MainFragment.kt");
+    idx.index_content(
+        &uri,
+        "class MainFragment {\n    private val binding by viewBinding<FooBarBinding>()\n}",
+    );
+    assert_eq!(
+        infer_variable_type_raw(&idx, "binding", &uri),
+        Some("FooBarBinding".into())
+    );
+}
+
+#[test]
+fn infer_variable_type_view_binding_inflate_delegate() {
+    use crate::indexer::Indexer;
+    use crate::resolver::infer::infer_variable_type_raw;
+
+    let idx = Indexer::new();
+    let uri = test_uri("/MainFragment.kt");
+    idx.index_content(
+        &uri,
+        "class MainFragment {\n    private val binding by viewBinding(FooBarBinding::inflate)\n}",
+    );
+    assert_eq!(
+        infer_variable_type_raw(&idx, "binding", &uri),
+        Some("FooBarBinding".into())
+    );
+}
+
+#[test]
+fn infer_variable_type_non_binding_delegate_unaffected() {
+    use crate::indexer::Indexer;
+    use crate::resolver::infer::infer_variable_type_raw;
+
+    let idx = Indexer::new();
+    let uri = test_uri("/Main.kt");
+    idx.index_content(
+        &uri,
+        "class Main {\n    private val repo by lazy { UserRepository() }\n}",
+    );
+    assert_eq!(
+        infer_variable_type_raw(&idx, "repo", &uri),
+        Some("UserRepository".into())
+    );
+}
