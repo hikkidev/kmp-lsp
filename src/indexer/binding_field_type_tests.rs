@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 
 use super::binding_field_type;
-use crate::indexer::Indexer;
+use crate::indexer::{binding_layout_completion_fields, Indexer};
+use crate::resolver::complete::complete_dot;
 use crate::resolver::infer::find_field_type_in_class_from;
 
 const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -293,5 +294,68 @@ fn binding_field_type_xml_wins_over_stale_generated_java() {
         ),
         Some("TextView".to_string()),
         "layout XML must not be overridden by stale generated Java declaring View"
+    );
+}
+
+#[test]
+fn binding_layout_completion_fields_without_generated_java() {
+    let fixture = BindingFieldTypeFixture::build(FOO_BAR_LAYOUT, None, None);
+    let fields =
+        binding_layout_completion_fields(&fixture.indexer, &fixture.kotlin_uri, "FooBarBinding");
+    let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert!(names.contains(&"myView"), "expected myView in {names:?}");
+    assert!(names.contains(&"header"), "expected header in {names:?}");
+    assert!(names.contains(&"root"), "expected root in {names:?}");
+}
+
+#[test]
+fn complete_dot_binding_lists_layout_fields_without_java() {
+    let fixture = BindingFieldTypeFixture::build(FOO_BAR_LAYOUT, None, None);
+    let items = complete_dot(
+        &fixture.indexer,
+        "FooBarBinding",
+        &fixture.kotlin_uri,
+        false,
+        None,
+    );
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"myView"),
+        "layout-only binding dot completion should include myView; got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"header"),
+        "layout-only binding dot completion should include header; got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"root"),
+        "layout-only binding dot completion should include root; got {labels:?}"
+    );
+}
+
+#[test]
+fn complete_dot_binding_dedups_layout_and_java_fields() {
+    let fixture = BindingFieldTypeFixture::build(FOO_BAR_LAYOUT, None, Some(STALE_BINDING_JAVA));
+    let items = complete_dot(
+        &fixture.indexer,
+        "FooBarBinding",
+        &fixture.kotlin_uri,
+        false,
+        None,
+    );
+    let my_view_items: Vec<_> = items.iter().filter(|item| item.label == "myView").collect();
+    assert_eq!(
+        my_view_items.len(),
+        1,
+        "duplicate myView entries from layout and Java: {:?}",
+        items
+            .iter()
+            .map(|item| (&item.label, &item.detail))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        my_view_items[0].detail.as_deref(),
+        Some("TextView"),
+        "layout XML detail should win over stale Java View"
     );
 }

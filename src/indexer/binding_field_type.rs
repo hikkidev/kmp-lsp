@@ -5,10 +5,17 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{SymbolKind, Url};
 
 use super::{
-    binding_class_name_for_layout, binding_field_name_to_id, layout_name_for_binding_class,
-    module_root_for_generated_file, module_root_for_source_file, view_id_matches_lookup, Indexer,
-    LayoutFileData,
+    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
+    layout_name_for_binding_class, module_root_for_generated_file, module_root_for_source_file,
+    view_id_matches_lookup, Indexer, LayoutFileData,
 };
+
+/// A layout-derived binding field for dot-completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BindingLayoutField {
+    pub name: String,
+    pub type_name: String,
+}
 
 /// Resolve a ViewBinding field type as seen from `source_uri`.
 ///
@@ -32,6 +39,61 @@ pub(crate) fn binding_field_type(
         }
     }
     source_uri.and_then(|uri| java_binding_field_type(index, uri, binding_class, field_name))
+}
+
+/// Layout-derived completion fields for a `*Binding` receiver (`binding.` list).
+pub(crate) fn binding_layout_completion_fields(
+    index: &Indexer,
+    source_uri: &Url,
+    binding_class: &str,
+) -> Vec<BindingLayoutField> {
+    let Some(module_root) = module_root_for_binding_class(index, Some(source_uri), binding_class)
+    else {
+        return Vec::new();
+    };
+    if layout_name_for_binding_class(binding_class).is_none() {
+        return Vec::new();
+    }
+    let layouts = index.layouts_for_binding_class(binding_class, &module_root);
+    if layouts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut fields: Vec<BindingLayoutField> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for layout in &layouts {
+        for view_id in &layout.view_ids {
+            let field_name = binding_id_to_field_name(&view_id.id);
+            let type_name = leaf_tag_name(&view_id.tag_name);
+            push_unique_layout_field(&mut fields, &mut seen_names, field_name, type_name);
+        }
+        for include in &layout.includes {
+            if let Some(include_id) = include.id.as_deref() {
+                let field_name = binding_id_to_field_name(include_id);
+                let type_name = binding_class_name_for_layout(&include.included_layout_name);
+                push_unique_layout_field(&mut fields, &mut seen_names, field_name, type_name);
+            }
+        }
+    }
+
+    if let Some(root_type) = root_field_type_from_variants(&layouts) {
+        push_unique_layout_field(&mut fields, &mut seen_names, "root".to_string(), root_type);
+    }
+
+    fields.sort_by(|left, right| left.name.cmp(&right.name));
+    fields
+}
+
+fn push_unique_layout_field(
+    fields: &mut Vec<BindingLayoutField>,
+    seen_names: &mut std::collections::HashSet<String>,
+    name: String,
+    type_name: String,
+) {
+    if seen_names.insert(name.clone()) {
+        fields.push(BindingLayoutField { name, type_name });
+    }
 }
 
 /// Extract the Java field type from a `SymbolEntry.detail` string.
