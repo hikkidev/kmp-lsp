@@ -2,13 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use tower_lsp::lsp_types::{SymbolKind, Url};
+use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
 use super::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    layout_name_for_binding_class, module_root_for_generated_file, module_root_for_source_file,
-    view_id_matches_lookup, Indexer, LayoutFileData,
+    find_this_context_in_lines, layout_name_for_binding_class, module_root_for_generated_file,
+    module_root_for_source_file, view_id_matches_lookup, Indexer, LayoutFileData, ThisContext,
 };
+use crate::types::CursorPos;
 
 /// A layout-derived binding field for dot-completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,48 @@ pub(crate) fn binding_field_type(
         }
     }
     source_uri.and_then(|uri| java_binding_field_type(index, uri, binding_class, field_name))
+}
+
+/// Infer the type of a bare binding-field access inside `with(binding)` / `binding.apply`.
+pub(crate) fn infer_bare_binding_field_type(
+    index: &Indexer,
+    uri: &Url,
+    position: Position,
+    field_name: &str,
+) -> Option<String> {
+    if index.name_shadowed_by_local_declaration(
+        uri,
+        position.line as usize,
+        position.character as usize,
+        field_name,
+    ) {
+        return None;
+    }
+    let lines = index
+        .mem_lines_for(uri.as_str())
+        .map(|live_lines| (*live_lines).clone())
+        .or_else(|| {
+            index
+                .files
+                .get(uri.as_str())
+                .map(|data| (*data.lines).clone())
+        })?;
+    let this_context = find_this_context_in_lines(
+        &lines,
+        CursorPos {
+            line: position.line as usize,
+            utf16_col: position.character as usize,
+        },
+        index,
+        uri,
+    );
+    let binding_class = match this_context {
+        ThisContext::Resolved(resolved_type) if resolved_type.ends_with("Binding") => resolved_type,
+        ThisContext::Resolved(_) | ThisContext::InsideReceiver | ThisContext::NotFound => {
+            return None;
+        }
+    };
+    binding_field_type(index, Some(uri), &binding_class, field_name)
 }
 
 /// Layout-derived completion fields for a `*Binding` receiver (`binding.` list).

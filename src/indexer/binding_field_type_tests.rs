@@ -7,9 +7,10 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 
 use super::binding_field_type;
-use crate::indexer::{binding_layout_completion_fields, Indexer};
+use crate::indexer::{binding_layout_completion_fields, infer_bare_binding_field_type, Indexer};
 use crate::resolver::complete::complete_dot;
-use crate::resolver::infer::find_field_type_in_class_from;
+use crate::resolver::infer::{find_field_type_in_class_from, infer_receiver_type_at};
+use tower_lsp::lsp_types::Position;
 
 const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -357,5 +358,151 @@ fn complete_dot_binding_dedups_layout_and_java_fields() {
         my_view_items[0].detail.as_deref(),
         Some("TextView"),
         "layout XML detail should win over stale Java View"
+    );
+}
+
+fn index_kotlin_with_source(indexer: &Indexer, uri: &Url, source: &str) {
+    indexer.index_content(uri, source);
+    indexer.set_live_lines(uri, source);
+    indexer.store_live_tree(uri, source);
+}
+
+fn position_on_word(source: &str, word: &str) -> Position {
+    let offset = source.find(word).expect("word in source");
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (index, character_value) in source.char_indices() {
+        if index == offset {
+            break;
+        }
+        if character_value == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += character_value.len_utf16() as u32;
+        }
+    }
+    Position { line, character }
+}
+
+#[test]
+fn bare_binding_field_type_inside_with_block() {
+    let fixture = BindingFieldTypeFixture::build(FOO_BAR_LAYOUT, None, None);
+    let source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        with(binding) {
+            myView
+        }
+    }
+}
+"#;
+    index_kotlin_with_source(&fixture.indexer, &fixture.kotlin_uri, source);
+    let position = position_on_word(source, "myView");
+    assert_eq!(
+        infer_bare_binding_field_type(&fixture.indexer, &fixture.kotlin_uri, position, "myView"),
+        Some("TextView".to_string())
+    );
+    assert_eq!(
+        infer_receiver_type_at(&fixture.indexer, "myView", &fixture.kotlin_uri, position)
+            .map(|receiver_type| receiver_type.leaf),
+        Some("TextView".to_string())
+    );
+}
+
+#[test]
+fn bare_binding_field_type_inside_apply_block() {
+    let fixture = BindingFieldTypeFixture::build(FOO_BAR_LAYOUT, None, None);
+    let source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        binding.apply {
+            myView
+        }
+    }
+}
+"#;
+    index_kotlin_with_source(&fixture.indexer, &fixture.kotlin_uri, source);
+    let position = position_on_word(source, "myView");
+    assert_eq!(
+        infer_bare_binding_field_type(&fixture.indexer, &fixture.kotlin_uri, position, "myView"),
+        Some("TextView".to_string())
+    );
+}
+
+#[test]
+fn bare_binding_field_type_local_shadowing_wins() {
+    let fixture = BindingFieldTypeFixture::build(FOO_BAR_LAYOUT, None, None);
+    let source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        with(binding) {
+            val title = "shadow"
+            title
+        }
+    }
+}
+"#;
+    index_kotlin_with_source(&fixture.indexer, &fixture.kotlin_uri, source);
+    let shadow_use = source.rfind("title").expect("shadowed title use");
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+    for (index, character_value) in source.char_indices() {
+        if index == shadow_use {
+            break;
+        }
+        if character_value == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += character_value.len_utf16() as u32;
+        }
+    }
+    let position = Position { line, character };
+    assert!(
+        infer_bare_binding_field_type(&fixture.indexer, &fixture.kotlin_uri, position, "title")
+            .is_none(),
+        "local val shadowing must suppress binding-field inference"
+    );
+}
+
+#[test]
+fn bare_completion_inside_with_lists_binding_layout_fields() {
+    let fixture = BindingFieldTypeFixture::build(FOO_BAR_LAYOUT, None, None);
+    let source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        with(binding) {
+            myV
+        }
+    }
+}
+"#;
+    index_kotlin_with_source(&fixture.indexer, &fixture.kotlin_uri, source);
+    let line = source
+        .lines()
+        .position(|line| line.contains("myV"))
+        .expect("completion line") as u32;
+    let character = source.lines().nth(line as usize).expect("line text").len() as u32;
+    let (items, _) =
+        fixture
+            .indexer
+            .completions(&fixture.kotlin_uri, Position::new(line, character), false);
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"myView"),
+        "with(binding) bare completion should suggest layout fields; got {labels:?}"
     );
 }

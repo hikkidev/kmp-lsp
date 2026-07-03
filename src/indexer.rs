@@ -81,8 +81,8 @@ pub(crate) use self::binding_discovery::{
 
 mod binding_field_type;
 pub(crate) use self::binding_field_type::{
-    binding_field_type, binding_layout_completion_fields, java_field_type_from_detail,
-    short_type_name,
+    binding_field_type, binding_layout_completion_fields, infer_bare_binding_field_type,
+    java_field_type_from_detail, short_type_name,
 };
 
 mod scan;

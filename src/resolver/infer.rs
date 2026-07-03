@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
-use crate::indexer::{binding_field_type, Indexer};
+use crate::indexer::{binding_field_type, infer_bare_binding_field_type, Indexer};
 use crate::types::FileData;
 use crate::LinesExt;
 use crate::StrExt;
@@ -245,6 +245,9 @@ pub(crate) fn infer_receiver_type_at(
     }
     if let Some(raw) = indexer.variable_type_at(uri, name, position) {
         return Some(ReceiverType::from_raw(raw));
+    }
+    if let Some(field_type) = infer_bare_binding_field_type(indexer, uri, position, name) {
+        return Some(ReceiverType::from_raw(field_type));
     }
     infer_receiver_type(indexer, ReceiverKind::Variable(name), uri)
 }
