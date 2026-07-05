@@ -20,6 +20,7 @@ pub(crate) use self::cst_folding::cst_folding_ranges;
 
 mod infer;
 pub(crate) mod resolution;
+pub(crate) use self::resolution::IndexRead;
 // Re-export pure helpers from submodules so existing callers within this file
 // and the inline test module (`use super::*`) continue to resolve them by name.
 #[cfg(test)]
@@ -63,6 +64,26 @@ pub(crate) mod enrich;
 pub(crate) use self::enrich::EnrichmentHandle;
 
 mod discover;
+
+mod layout;
+pub(crate) use self::layout::{
+    is_layout_xml_path, layout_path_components, LayoutCacheEntry, LayoutFileData,
+};
+
+mod binding_discovery;
+pub(crate) use self::binding_discovery::{
+    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
+    import_triggers_binding_discovery, is_generated_binding_watcher_path,
+    layout_name_for_binding_class, module_root_for_generated_file, module_root_for_source_file,
+    spawn_binding_discovery_worker, view_id_matches_lookup, BindingDiscoveryHandle,
+    DatabindingWatcherHandle, DatabindingWatcherState, ModuleBindings, ModuleBindingsCacheEntry,
+};
+
+mod binding_field_type;
+pub(crate) use self::binding_field_type::{
+    binding_field_type, binding_layout_completion_fields, infer_bare_binding_field_type,
+    java_field_type_from_detail, short_type_name,
+};
 
 mod scan;
 pub(crate) const MAX_FILES_UNLIMITED: usize = usize::MAX;
@@ -299,6 +320,14 @@ pub(crate) struct Indexer {
     /// one-package-per-jar inference. Empty string where the sidecar gave no package.
     /// NOT cleared by `reset_index_state()`.
     pub(crate) jar_symbol_packages: DashMap<String, Vec<String>>,
+    /// URI string → parsed Android layout XML metadata (ViewBinding side index).
+    pub(crate) layouts: DashMap<String, Arc<LayoutFileData>>,
+    /// Module root → discovered generated ViewBinding Java files.
+    pub(crate) generated_bindings: DashMap<PathBuf, Arc<ModuleBindings>>,
+    /// Handle for enqueueing background generated-binding discovery.
+    pub(crate) binding_discovery: std::sync::RwLock<BindingDiscoveryHandle>,
+    /// Handle for registering module roots with the server-side databinding poll watcher.
+    pub(crate) databinding_watcher: std::sync::RwLock<DatabindingWatcherHandle>,
 }
 
 /// Cap on how many same-named definitions a receiver-less by-name inference lookup
@@ -317,11 +346,25 @@ impl InferDeps for Indexer {
     fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String> {
         infer_variable_type_raw(self, var_name, uri)
     }
+    fn find_var_type_at(&self, var_name: &str, uri: &Url, position: Position) -> Option<String> {
+        self.variable_type_at(uri, var_name, position)
+    }
     fn find_field_type(&self, class_name: &str, field_name: &str) -> Option<String> {
         if let Some(type_name) = synthetic_enum_field(self, class_name, field_name) {
             return Some(type_name);
         }
         crate::resolver::infer::find_field_type_in_class(self, class_name, field_name)
+    }
+    fn find_field_type_from(
+        &self,
+        class_name: &str,
+        field_name: &str,
+        uri: &Url,
+    ) -> Option<String> {
+        if let Some(type_name) = synthetic_enum_field(self, class_name, field_name) {
+            return Some(type_name);
+        }
+        crate::resolver::infer::find_field_type_in_class_from(self, class_name, field_name, uri)
     }
     fn find_fun_return_type(&self, fn_name: &str) -> Option<String> {
         crate::resolver::infer::find_fun_return_type_by_name(self, fn_name)
@@ -560,6 +603,10 @@ impl Indexer {
             jar_uri_to_defs: DashMap::new(),
             jar_symbol_packages: DashMap::new(),
             extension_by_receiver: DashMap::new(),
+            layouts: DashMap::new(),
+            generated_bindings: DashMap::new(),
+            binding_discovery: std::sync::RwLock::new(BindingDiscoveryHandle::noop()),
+            databinding_watcher: std::sync::RwLock::new(DatabindingWatcherHandle::noop()),
         }
     }
 
@@ -677,6 +724,11 @@ impl Indexer {
         self.completion_epoch.fetch_add(1, Ordering::Release);
         self.sig_cache.clear();
         self.sig_fast_cache.clear();
+        self.layouts.clear();
+        self.generated_bindings.clear();
+        if let Ok(handle) = self.binding_discovery.read() {
+            handle.clear();
+        }
         // Clear enrichment dedup so symbols are re-attempted after reindex.
         if let Ok(handle) = self.enrichment.read() {
             handle.clear();
@@ -907,6 +959,16 @@ impl Indexer {
         self.files.remove(uri.as_str());
     }
 
+    pub(crate) fn remove_layout(&self, uri: &Url) {
+        self.layouts.remove(uri.as_str());
+    }
+
+    /// Read accessor for the layout side index; used by ViewBinding navigation (PR 4+).
+    #[allow(dead_code)]
+    pub(crate) fn layout_for_uri(&self, uri: &str) -> Option<Arc<LayoutFileData>> {
+        self.layouts.get(uri).map(|entry| Arc::clone(entry.value()))
+    }
+
     /// Bust the completion cache so the next request recomputes with the latest
     /// index state. Called when JAR indexing finishes to surface new symbols
     /// (e.g. `launch {}`) without requiring the user to retype.
@@ -932,6 +994,17 @@ impl Indexer {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return;
+        }
+        if let Ok(path) = uri.to_file_path() {
+            if crate::indexer::layout::is_layout_xml_path(&path) {
+                if self.layouts.contains_key(uri.as_str()) {
+                    return;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    self.index_layout_content(uri, &content);
+                }
+                return;
+            }
         }
         if !self.files.contains_key(uri.as_str()) {
             if let Ok(path) = uri.to_file_path() {

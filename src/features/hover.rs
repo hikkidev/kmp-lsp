@@ -9,12 +9,16 @@ use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Posi
 
 use crate::backend::cursor::CursorContext;
 use crate::backend::format::{format_contextual_hover, format_symbol_hover};
+use crate::features::viewbinding::{
+    binding_field_hover_at_location, binding_field_hover_for_class, resolve_expected_binding_class,
+};
 use crate::indexer::apply_type_subst;
 use crate::indexer::resolution::{
     build_subst_map, enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext,
     WorkspaceRead,
 };
 use crate::resolver::ReceiverType;
+use crate::StrExt;
 
 /// Compute a hover response for the cursor at `position` in `uri`.
 ///
@@ -32,10 +36,34 @@ pub(crate) fn compute_hover<W: WorkspaceRead>(
     if ctx.qualifier.is_none() && ctx.lambda_decl.is_some() {
         return jar_loading_hint(workspace);
     }
+    if let Some(hover) = binding_field_access_hover(workspace, ctx, uri, position) {
+        return Some(hover);
+    }
     if let Some(hover) = contextual_receiver_hover(workspace, ctx, uri, position) {
         return Some(hover);
     }
     regular_symbol_hover(workspace, ctx, uri, position).or_else(|| jar_loading_hint(workspace))
+}
+
+fn binding_field_access_hover<W: WorkspaceRead>(
+    workspace: &W,
+    ctx: &CursorContext,
+    uri: &Url,
+    position: Position,
+) -> Option<Hover> {
+    let indexer = workspace.as_indexer()?;
+    if ctx.word.starts_with_uppercase() {
+        return None;
+    }
+    let expected_class =
+        crate::features::viewbinding::resolve_expected_binding_class(indexer, uri, position, ctx)?;
+    let markdown = crate::features::viewbinding::binding_field_hover_for_class(
+        indexer,
+        uri,
+        &expected_class,
+        &ctx.word,
+    )?;
+    Some(make_markdown_hover(markdown))
 }
 
 fn contextual_lambda_hover<W: WorkspaceRead>(
@@ -91,7 +119,19 @@ fn contextual_receiver_hover<W: WorkspaceRead>(
         hover_substitution_context(uri, position.line),
         &ResolveOptions::hover(),
     )?;
-    Some(make_markdown_hover(format_symbol_hover(&info, uri.path())))
+    Some(make_markdown_hover(
+        binding_field_hover_at_location(workspace, &location, &ctx.word)
+            .or_else(|| {
+                workspace.as_indexer().and_then(|indexer| {
+                    resolve_expected_binding_class(indexer, uri, position, ctx).and_then(
+                        |class_name| {
+                            binding_field_hover_for_class(indexer, uri, &class_name, &ctx.word)
+                        },
+                    )
+                })
+            })
+            .unwrap_or_else(|| format_symbol_hover(&info, uri.path())),
+    ))
 }
 
 fn regular_symbol_hover<W: WorkspaceRead>(
@@ -151,7 +191,10 @@ fn resolve_hover_markdown<W: WorkspaceRead>(
         hover_substitution_context(uri, line),
         &ResolveOptions::hover(),
     )
-    .map(|info| format_symbol_hover(&info, uri.path()))
+    .map(|info| {
+        binding_field_hover_at_location(workspace, &info.location, &info.name)
+            .unwrap_or_else(|| format_symbol_hover(&info, uri.path()))
+    })
 }
 
 /// Resolve a symbol name with receiver-type fallback.

@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::{
     Url,
 };
 
-use crate::indexer::Indexer;
+use crate::indexer::{binding_layout_completion_fields, Indexer};
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
@@ -14,7 +14,7 @@ use crate::LinesExt;
 use crate::StrExt;
 
 use super::infer::{
-    find_field_type_in_class, find_fun_return_type_by_name, find_method_return_type,
+    find_field_type_in_class_from, find_fun_return_type_by_name, find_method_return_type,
     infer_receiver_type, infer_receiver_type_at, infer_variable_type_raw, ReceiverKind,
     ReceiverType,
 };
@@ -629,7 +629,7 @@ fn complete_dot_expr(
         return vec![];
     };
 
-    let mut items = Vec::new();
+    let mut items = binding_layout_dot_completion_items(indexer, from_uri, &receiver_type.leaf);
     let file_found =
         resolve_dot_receiver_file(indexer, &receiver_type.outer, from_uri).map(|file_uri| {
             let context = DotCompletionContext {
@@ -756,7 +756,8 @@ fn resolve_dotted_receiver_type(indexer: &Indexer, path: &str, uri: &Url) -> Opt
 
         let clean_segment = segment.trim_end_matches("()").trim();
 
-        if let Some(next_type) = find_field_type_in_class(indexer, current_base_leaf, clean_segment)
+        if let Some(next_type) =
+            find_field_type_in_class_from(indexer, current_base_leaf, clean_segment, uri)
         {
             current_type = next_type;
         } else if let Some(next_type) =
@@ -876,6 +877,30 @@ fn dedup_completion_labels(items: &mut Vec<CompletionItem>) {
     items.retain(|item| {
         !seen_labels.contains(item.label.as_str()) && seen_labels.insert(item.label.clone())
     });
+}
+
+fn binding_layout_dot_completion_items(
+    indexer: &Indexer,
+    from_uri: &Url,
+    binding_class: &str,
+) -> Vec<CompletionItem> {
+    if !binding_class.ends_with("Binding") {
+        return Vec::new();
+    }
+    binding_layout_completion_fields(indexer, from_uri, binding_class)
+        .into_iter()
+        .map(|field| CompletionItem {
+            label: field.name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(field.type_name),
+            sort_text: Some(format!(
+                "0{}",
+                kind_sort_rank(Some(CompletionItemKind::FIELD))
+            )),
+            filter_text: Some(field.name),
+            ..Default::default()
+        })
+        .collect()
 }
 
 fn strip_completion_snippets(items: &mut [CompletionItem], snippets: bool) {

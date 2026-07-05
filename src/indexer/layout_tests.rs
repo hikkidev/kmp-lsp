@@ -1,0 +1,189 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tower_lsp::lsp_types::Url;
+
+use super::{
+    build_layout_file_data, is_layout_xml_path, layout_path_components, parse_layout_xml,
+    LayoutPathComponents,
+};
+use crate::indexer::cache::{save_cache, try_load_cache, CACHE_VERSION};
+use crate::indexer::test_helpers::with_xdg_cache;
+use crate::indexer::Indexer;
+
+const SAMPLE_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <include
+        android:id="@+id/header"
+        layout="@layout/view_header" />
+</androidx.constraintlayout.widget.ConstraintLayout>
+"#;
+
+#[test]
+fn parse_layout_xml_extracts_ids_includes_and_root_tag() {
+    let parsed = parse_layout_xml(SAMPLE_LAYOUT);
+    let root_tag = parsed.root_tag.expect("root tag");
+    assert!(
+        root_tag.tag_name.contains("ConstraintLayout"),
+        "unexpected root tag: {}",
+        root_tag.tag_name
+    );
+    assert!(!parsed.view_binding_ignore);
+
+    let title = parsed
+        .view_ids
+        .iter()
+        .find(|view_id| view_id.id == "title")
+        .expect("title id");
+    assert_eq!(title.tag_name, "TextView");
+    assert!(title.id_attribute_range.start.line >= 7);
+
+    let include = parsed.includes.first().expect("include");
+    assert_eq!(include.id.as_deref(), Some("header"));
+    assert_eq!(include.included_layout_name, "view_header");
+}
+
+#[test]
+fn parse_layout_xml_view_binding_ignore_flag() {
+    let content = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:tools="http://schemas.android.com/tools"
+    tools:viewBindingIgnore="true"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent" />
+"#;
+    let parsed = parse_layout_xml(content);
+    assert!(parsed.view_binding_ignore);
+}
+
+#[test]
+fn parse_layout_xml_include_without_id() {
+    let content = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout>
+    <include layout="@layout/view_header" />
+</LinearLayout>
+"#;
+    let parsed = parse_layout_xml(content);
+    let include = parsed.includes.first().expect("include");
+    assert!(include.id.is_none());
+    assert_eq!(include.included_layout_name, "view_header");
+}
+
+#[test]
+fn parse_layout_xml_malformed_returns_best_effort_without_panic() {
+    let parsed = parse_layout_xml("");
+    assert!(parsed.view_ids.is_empty());
+}
+
+#[test]
+fn layout_path_components_default_and_qualifier_variants() {
+    let default_path = PathBuf::from("app/src/main/res/layout/foo_bar.xml");
+    let components = layout_path_components(&default_path).expect("default layout");
+    assert_eq!(components.module_root, PathBuf::from("app"));
+    assert_eq!(components.layout_name, "foo_bar");
+    assert!(components.variant_qualifier.is_empty());
+
+    let land_path = PathBuf::from("app/src/main/res/layout-land/foo_bar.xml");
+    let land = layout_path_components(&land_path).expect("land layout");
+    assert_eq!(land.variant_qualifier, "land");
+}
+
+#[test]
+fn layout_path_components_rejects_non_layout_directories() {
+    let rejected = PathBuf::from("app/src/main/res/layouts_backup/foo_bar.xml");
+    assert!(layout_path_components(&rejected).is_none());
+    assert!(!is_layout_xml_path(&rejected));
+}
+
+#[test]
+fn layout_path_components_rejects_non_res_parent() {
+    let rejected = PathBuf::from("app/src/main/assets/layout/foo_bar.xml");
+    assert!(layout_path_components(&rejected).is_none());
+}
+
+#[test]
+fn layout_path_components_nested_module_root() {
+    let path = PathBuf::from("project/app/src/androidMain/res/layout-sw600dp/screen.xml");
+    let components = layout_path_components(&path).expect("nested module");
+    assert_eq!(components.module_root, PathBuf::from("project/app"));
+    assert_eq!(components.variant_qualifier, "sw600dp");
+}
+
+#[test]
+fn index_layout_content_populates_side_index() {
+    let indexer = Indexer::new();
+    let layout_path = PathBuf::from("app/src/main/res/layout/activity_main.xml");
+    let uri = Url::from_file_path(std::env::current_dir().unwrap().join(&layout_path)).unwrap();
+    indexer.index_layout_content(&uri, SAMPLE_LAYOUT);
+
+    let data = indexer.layout_for_uri(uri.as_str()).expect("layout data");
+    assert_eq!(data.layout_name, "activity_main");
+    assert!(data.view_ids.iter().any(|view_id| view_id.id == "title"));
+}
+
+#[test]
+fn remove_layout_clears_side_index_entry() {
+    let indexer = Indexer::new();
+    let layout_path = PathBuf::from("app/src/main/res/layout/activity_main.xml");
+    let uri = Url::from_file_path(std::env::current_dir().unwrap().join(&layout_path)).unwrap();
+    indexer.index_layout_content(&uri, SAMPLE_LAYOUT);
+    indexer.remove_layout(&uri);
+    assert!(indexer.layout_for_uri(uri.as_str()).is_none());
+}
+
+#[test]
+fn layout_cache_roundtrip() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workspace");
+    std::fs::create_dir_all(&root).expect("mkdir workspace");
+
+    let components = LayoutPathComponents {
+        module_root: PathBuf::from("app"),
+        layout_name: "foo_bar".to_string(),
+        variant_qualifier: String::new(),
+    };
+    let parsed = parse_layout_xml(SAMPLE_LAYOUT);
+    let data = build_layout_file_data(&components, &parsed).expect("layout data");
+    let layout_path = tmp.path().join("app/src/main/res/layout/foo_bar.xml");
+    std::fs::create_dir_all(layout_path.parent().unwrap()).expect("mkdir layout dir");
+    std::fs::write(&layout_path, SAMPLE_LAYOUT).expect("write layout");
+
+    let indexer = Indexer::new();
+    let uri = Url::from_file_path(&layout_path).expect("layout uri");
+    indexer.layouts.insert(uri.to_string(), Arc::new(data));
+
+    with_xdg_cache(tmp.path(), || {
+        save_cache(
+            &root,
+            &indexer.files,
+            &indexer.content_hashes,
+            &indexer.library_uris,
+            &indexer.layouts,
+            &indexer.generated_bindings,
+            true,
+            true,
+        );
+
+        let loaded = try_load_cache(&root).expect("cache loaded");
+        assert_eq!(loaded.version, CACHE_VERSION);
+        let entry = loaded
+            .layouts
+            .get(&layout_path.to_string_lossy().to_string())
+            .expect("layout cache entry");
+        assert_eq!(entry.data.layout_name, "foo_bar");
+        assert!(entry
+            .data
+            .view_ids
+            .iter()
+            .any(|view_id| view_id.id == "title"));
+    });
+}

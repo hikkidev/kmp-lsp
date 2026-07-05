@@ -13,8 +13,10 @@ use super::{
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
 use crate::queries::{
-    KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT,
-    KIND_OBJECT_DECL,
+    KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_ENUM_CLASS_BODY, KIND_FUN_DECL,
+    KIND_FUN_VALUE_PARAMS, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_NULLABLE_TYPE,
+    KIND_OBJECT_DECL, KIND_PARAMETER, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE,
+    KIND_USER_TYPE, KIND_VAR_DECL,
 };
 use crate::types::CursorPos;
 use crate::StrExt;
@@ -386,6 +388,149 @@ impl Indexer {
         None
     }
 
+    /// Infer the declared type of `var_name` visible at `position`, walking the
+    /// CST from the cursor outward: function params → local `val`/`var` → class
+    /// members → file-global fallback.
+    pub(crate) fn variable_type_at(
+        &self,
+        uri: &Url,
+        var_name: &str,
+        position: Position,
+    ) -> Option<String> {
+        if let Some(scoped) = self.variable_type_at_from_cst(uri, var_name, position) {
+            return Some(scoped);
+        }
+        crate::resolver::infer::infer_variable_type_raw(self, var_name, uri)
+    }
+
+    fn variable_type_at_from_cst(
+        &self,
+        uri: &Url,
+        var_name: &str,
+        position: Position,
+    ) -> Option<String> {
+        let doc = self.live_doc_or_parse(uri)?;
+        let line_text = self
+            .lines_for(uri)
+            .and_then(|lines| lines.get(position.line as usize).cloned())
+            .unwrap_or_default();
+        let byte_column = utf16_col_to_byte(&line_text, position.character as usize);
+        let point = Point {
+            row: position.line as usize,
+            column: byte_column,
+        };
+        let cursor_node = doc
+            .tree
+            .root_node()
+            .descendant_for_point_range(point, point)?;
+        let bytes = doc.bytes.as_slice();
+
+        let mut node = cursor_node;
+        loop {
+            if node.kind() == KIND_FUN_DECL {
+                if let Some(parameter_type) = function_parameter_type(node, var_name, bytes) {
+                    return Some(parameter_type);
+                }
+            }
+
+            let Some(parent) = node.parent() else {
+                break;
+            };
+
+            if matches!(
+                parent.kind(),
+                KIND_CLASS_BODY | KIND_ENUM_CLASS_BODY | KIND_SOURCE_FILE
+            ) {
+                return member_property_type(parent, var_name, bytes);
+            }
+
+            let mut previous = node.prev_sibling();
+            while let Some(sibling) = previous {
+                if let Some(local_type) = property_declaration_type(sibling, var_name, bytes) {
+                    return Some(local_type);
+                }
+                previous = sibling.prev_sibling();
+            }
+            node = parent;
+        }
+        None
+    }
+
+    /// True when `name` at `(line, utf16_column)` is bound by a nearer local
+    /// declaration — a `val`/`var`, a function parameter, or a lambda parameter —
+    /// that shadows any implicit-receiver member of the same name.
+    ///
+    /// Kotlin resolves a bare identifier to an in-scope local before consulting
+    /// an implicit receiver (`with(binding) { … }`, `binding.apply { … }`), so
+    /// callers that treat a bare name as `this.name` must first rule out a
+    /// shadowing local. The walk stops at the enclosing function and at type
+    /// bodies: class/object/enum members and top-level declarations never shadow
+    /// an inner receiver-lambda member (the innermost implicit receiver wins).
+    pub(crate) fn name_shadowed_by_local_declaration(
+        &self,
+        uri: &Url,
+        line: usize,
+        utf16_column: usize,
+        name: &str,
+    ) -> bool {
+        let Some(doc) = self.live_doc_or_parse(uri) else {
+            return false;
+        };
+        let line_text = self
+            .lines_for(uri)
+            .and_then(|lines| lines.get(line).cloned())
+            .unwrap_or_default();
+        let byte_column = utf16_col_to_byte(&line_text, utf16_column);
+        let point = Point {
+            row: line,
+            column: byte_column,
+        };
+        let Some(cursor_node) = doc
+            .tree
+            .root_node()
+            .descendant_for_point_range(point, point)
+        else {
+            return false;
+        };
+        let bytes = doc.bytes.as_slice();
+        let mut node = cursor_node;
+        loop {
+            if node.kind() == KIND_LAMBDA_LIT
+                && node
+                    .lambda_param_names(bytes)
+                    .iter()
+                    .any(|param| param == name)
+            {
+                return true;
+            }
+            if node.kind() == KIND_FUN_DECL {
+                // Parameters bind the innermost non-lambda scope; beyond the
+                // function are members / top-level, so the search ends here.
+                return function_value_parameter_names(node, bytes)
+                    .iter()
+                    .any(|param| param == name);
+            }
+            let Some(parent) = node.parent() else {
+                return false;
+            };
+            let parent_holds_members = matches!(
+                parent.kind(),
+                KIND_CLASS_BODY | KIND_ENUM_CLASS_BODY | KIND_SOURCE_FILE
+            );
+            if parent_holds_members {
+                return false;
+            }
+            let mut previous = node.prev_sibling();
+            while let Some(sibling) = previous {
+                if property_declaration_binds_name(sibling, bytes, name) {
+                    return true;
+                }
+                previous = sibling.prev_sibling();
+            }
+            node = parent;
+        }
+    }
+
     /// Find the name of the innermost enclosing class/interface/object
     /// that contains `row` in the given file.
     ///
@@ -554,6 +699,129 @@ pub(super) fn extract_class_decl_name(line: &str) -> Option<String> {
         return None;
     }
     Some(name)
+}
+
+/// Names declared by a function declaration's value-parameter list.
+fn function_value_parameter_names(
+    function_node: tree_sitter::Node<'_>,
+    bytes: &[u8],
+) -> Vec<String> {
+    let Some(parameters) = function_node.first_child_of_kind(KIND_FUN_VALUE_PARAMS) else {
+        return Vec::new();
+    };
+    parameters
+        .children_of_kind(KIND_PARAMETER)
+        .into_iter()
+        .filter_map(|parameter| parameter.first_child_of_kind(KIND_SIMPLE_IDENT))
+        .filter_map(|identifier| identifier.utf8_text_owned(bytes))
+        .collect()
+}
+
+/// True when `node` is a `val`/`var` declaration whose bound name is `name`.
+fn property_declaration_binds_name(node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    if node.kind() != KIND_PROP_DECL {
+        return false;
+    }
+    let Some(variable_declaration) = node.first_child_of_kind(KIND_VAR_DECL) else {
+        return false;
+    };
+    variable_declaration
+        .first_child_of_kind(KIND_SIMPLE_IDENT)
+        .and_then(|identifier| identifier.utf8_text_owned(bytes))
+        .as_deref()
+        == Some(name)
+}
+
+fn function_parameter_type(
+    function_node: tree_sitter::Node<'_>,
+    var_name: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    let parameters = function_node.first_child_of_kind(KIND_FUN_VALUE_PARAMS)?;
+    for parameter in parameters.children_of_kind(KIND_PARAMETER) {
+        if let Some(parameter_type) = parameter_type_if_named(parameter, var_name, bytes) {
+            return Some(parameter_type);
+        }
+    }
+    None
+}
+
+fn parameter_type_if_named(
+    parameter: tree_sitter::Node<'_>,
+    var_name: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    let identifier = parameter.first_child_of_kind(KIND_SIMPLE_IDENT)?;
+    if identifier.utf8_text_owned(bytes).as_deref() != Some(var_name) {
+        return None;
+    }
+    type_annotation_from_node(parameter, bytes)
+}
+
+fn property_declaration_type(
+    node: tree_sitter::Node<'_>,
+    var_name: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    if !property_declaration_binds_name(node, bytes, var_name) {
+        return None;
+    }
+    let variable_declaration = node.first_child_of_kind(KIND_VAR_DECL)?;
+    type_annotation_from_node(variable_declaration, bytes)
+}
+
+fn member_property_type(
+    member_container: tree_sitter::Node<'_>,
+    var_name: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    let mut cursor = member_container.walk();
+    for child in member_container.children(&mut cursor) {
+        if child.kind() != KIND_PROP_DECL {
+            continue;
+        }
+        if let Some(property_type) = property_declaration_type(child, var_name, bytes) {
+            return Some(property_type);
+        }
+    }
+    None
+}
+
+fn type_annotation_from_node(node: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    let mut found_name = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == KIND_SIMPLE_IDENT {
+            found_name = true;
+            continue;
+        }
+        if !found_name {
+            continue;
+        }
+        if child.kind() == ":" {
+            continue;
+        }
+        if child.kind() == KIND_USER_TYPE {
+            return user_type_name(child, bytes);
+        }
+        if child.kind() == KIND_NULLABLE_TYPE {
+            return nullable_user_type_name(child, bytes);
+        }
+    }
+    None
+}
+
+fn user_type_name(user_type: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    let raw = user_type.utf8_text_owned(bytes)?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(raw)
+}
+
+fn nullable_user_type_name(nullable_type: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    let raw = nullable_type.utf8_text_owned(bytes)?;
+    Some(raw.trim_end_matches('?').to_string())
 }
 
 pub(crate) fn is_id_char(c: char) -> bool {

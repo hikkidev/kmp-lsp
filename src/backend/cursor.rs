@@ -11,8 +11,9 @@
 
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::indexer::Indexer;
+use crate::indexer::{find_this_context_in_lines, Indexer, ThisContext};
 use crate::resolver::{infer_receiver_type, infer_receiver_type_at, ReceiverKind, ReceiverType};
+use crate::types::CursorPos;
 
 /// Cursor context for identifier-based LSP features (hover, goto-def, completion).
 ///
@@ -66,12 +67,30 @@ impl CursorContext {
 
         let is_contextual = is_it_or_this || in_scope_lambda_params.contains(&word);
 
-        let contextual = if is_contextual {
+        let implicit_this_receiver = if !is_contextual
+            && qualifier.is_none()
+            && word
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_lowercase())
+        {
+            implicit_receiver_type_for_bare_member(indexer, uri, line, col, &word)
+        } else {
+            None
+        };
+
+        let is_contextual = is_contextual || implicit_this_receiver.is_some();
+
+        let mut qualifier = qualifier;
+        let contextual = if let Some(receiver_type) = implicit_this_receiver {
+            qualifier = Some("this".to_string());
+            Some(receiver_type)
+        } else if is_contextual {
             let name: &str = qualifier.as_deref().unwrap_or(&word);
             infer_receiver_type(indexer, ReceiverKind::Contextual { name, position }, uri)
-        } else if let Some(q) = qualifier.as_deref() {
+        } else if let Some(qualifier_name) = qualifier.as_deref() {
             // Non-lambda qualifier — try smart cast narrowing (when/is branches)
-            infer_receiver_type_at(indexer, q, uri, position)
+            infer_receiver_type_at(indexer, qualifier_name, uri, position)
         } else {
             None
         };
@@ -101,5 +120,37 @@ impl CursorContext {
             contextual,
             lambda_decl,
         })
+    }
+}
+
+/// Bare member access inside a receiver lambda (`with(binding) { title }`,
+/// `binding.apply { title }`) uses implicit `this` — same as explicit `this.title`.
+///
+/// A nearer local declaration (val/var/param/lambda param) named `word` shadows
+/// the implicit receiver member, so bail out in that case: Kotlin would resolve
+/// the bare name to the local, not to `this.word`.
+fn implicit_receiver_type_for_bare_member(
+    indexer: &Indexer,
+    uri: &Url,
+    line: usize,
+    col: usize,
+    word: &str,
+) -> Option<ReceiverType> {
+    if indexer.name_shadowed_by_local_declaration(uri, line, col, word) {
+        return None;
+    }
+    let lines = indexer.mem_lines_for(uri.as_str())?;
+    let this_context = find_this_context_in_lines(
+        &lines,
+        CursorPos {
+            line,
+            utf16_col: col,
+        },
+        indexer,
+        uri,
+    );
+    match this_context {
+        ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
+        ThisContext::InsideReceiver | ThisContext::NotFound => None,
     }
 }

@@ -4,6 +4,8 @@ use super::cursor::CursorContext;
 use super::Backend;
 use crate::features::definition as def;
 use crate::features::implementation as imp;
+use crate::features::viewbinding;
+use crate::indexer::is_layout_xml_path;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 impl Backend {
@@ -15,9 +17,26 @@ impl Backend {
         let uri = &pp.text_document.uri;
         let position = pp.position;
 
+        if uri
+            .to_file_path()
+            .is_ok_and(|path| is_layout_xml_path(&path))
+        {
+            if let Some(response) =
+                viewbinding::find_layout_xml_definition(&*self.indexer, uri, position)
+            {
+                return Ok(Some(response));
+            }
+        }
+
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
         };
+
+        if let Some(response) =
+            viewbinding::find_binding_field_definition(&self.indexer, uri, position, &ctx)
+        {
+            return Ok(self.rewrite_jar_targets_off_thread(Some(response)).await);
+        }
 
         let response = def::find_definition(&ctx, &*self.indexer, uri, position).await;
         Ok(self.rewrite_jar_targets_off_thread(response).await)
@@ -31,12 +50,22 @@ impl Backend {
         let uri = &pp.text_document.uri;
         let position = pp.position;
 
+        if uri
+            .to_file_path()
+            .is_ok_and(|path| is_layout_xml_path(&path))
+        {
+            if let Some(response) =
+                viewbinding::find_layout_xml_implementation(&*self.indexer, uri, position)
+            {
+                return Ok(self.rewrite_jar_targets_off_thread(Some(response)).await);
+            }
+        }
+
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
         };
 
-        let response =
-            imp::find_implementation(&ctx.word, &*self.indexer, uri, position.line).await;
+        let response = imp::find_implementation(&ctx, &*self.indexer, uri, position).await;
         Ok(self.rewrite_jar_targets_off_thread(response).await)
     }
 
