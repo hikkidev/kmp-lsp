@@ -329,6 +329,42 @@ fn restore_generated_bindings_from_cache_registers_watcher_module() {
 }
 
 #[test]
+fn view_id_lookup_prefers_exact_match_over_ambiguous_normalized() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let default_path = module_root.join("src/main/res/layout/conflict.xml");
+    let land_path = module_root.join("src/main/res/layout-land/conflict.xml");
+    fs::create_dir_all(default_path.parent().unwrap()).expect("mkdir layout");
+    fs::create_dir_all(land_path.parent().unwrap()).expect("mkdir land");
+    let layout = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android">
+    <TextView android:id="@+id/fooBar" />
+</LinearLayout>
+"#;
+    fs::write(&default_path, layout).expect("write default");
+    fs::write(&land_path, layout).expect("write land");
+
+    let indexer = Indexer::new();
+    indexer.index_layout_content(
+        &Url::from_file_path(&default_path).expect("default uri"),
+        layout,
+    );
+    indexer.index_layout_content(
+        &Url::from_file_path(&land_path).expect("land uri"),
+        layout,
+    );
+
+    let exact = indexer.layouts_declaring_view_id(&module_root, "conflict", "fooBar");
+    assert_eq!(exact.len(), 2, "exact camelCase id matches both variants");
+
+    let ambiguous = indexer.layouts_declaring_view_id(&module_root, "conflict", "foo_bar");
+    assert!(
+        ambiguous.is_empty(),
+        "normalized fallback must not pick when multiple variants normalize-match"
+    );
+}
+
+#[test]
 fn generated_bindings_cache_roundtrip() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("workspace");

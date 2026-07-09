@@ -150,12 +150,20 @@ pub(crate) fn binding_id_to_field_name(id: &str) -> String {
     snake_case_to_camel_case(id)
 }
 
-/// True when a layout `@+id/…` value matches a field lookup id (snake or camelCase).
-pub(crate) fn view_id_matches_lookup(view_id: &str, lookup_id: &str) -> bool {
-    if view_id == lookup_id {
-        return true;
-    }
+/// True when a layout `@+id/…` value exactly matches a field lookup id.
+pub(crate) fn view_id_exact_match(view_id: &str, lookup_id: &str) -> bool {
+    view_id == lookup_id
+}
+
+/// True when a layout `@+id/…` value matches a field lookup id after camelCase normalization.
+pub(crate) fn view_id_normalized_match(view_id: &str, lookup_id: &str) -> bool {
     binding_id_to_field_name(view_id) == binding_id_to_field_name(lookup_id)
+}
+
+/// Exact id match first; normalized camelCase/snake_case only when it yields a single candidate.
+pub(crate) fn view_id_matches_lookup(view_id: &str, lookup_id: &str) -> bool {
+    view_id_exact_match(view_id, lookup_id)
+        || view_id_normalized_match(view_id, lookup_id)
 }
 
 fn snake_case_to_camel_case(name: &str) -> String {
@@ -640,15 +648,37 @@ impl super::Indexer {
         layout_name: &str,
         id: &str,
     ) -> Vec<(String, Range)> {
-        self.matching_layout_entries(module_root, layout_name)
+        let entries = self.matching_layout_entries(module_root, layout_name);
+        let exact_matches: Vec<(String, Range)> = entries
             .into_iter()
             .filter_map(|(uri, data)| {
                 data.view_ids
                     .iter()
-                    .find(|view_id| view_id_matches_lookup(&view_id.id, id))
+                    .find(|view_id| view_id_exact_match(&view_id.id, id))
                     .map(|view_id| (uri, view_id.id_attribute_range))
             })
-            .collect()
+            .collect();
+        if !exact_matches.is_empty() {
+            return exact_matches;
+        }
+
+        let normalized_matches: Vec<(String, Range)> = self
+            .matching_layout_entries(module_root, layout_name)
+            .into_iter()
+            .filter_map(|(uri, data)| {
+                data.view_ids
+                    .iter()
+                    .find(|view_id| {
+                        !view_id_exact_match(&view_id.id, id)
+                            && view_id_normalized_match(&view_id.id, id)
+                    })
+                    .map(|view_id| (uri, view_id.id_attribute_range))
+            })
+            .collect();
+        if normalized_matches.len() == 1 {
+            return normalized_matches;
+        }
+        Vec::new()
     }
 
     /// `<include>` tag ranges whose `android:id` maps to `field_name`.
@@ -659,19 +689,42 @@ impl super::Indexer {
         field_name: &str,
     ) -> Vec<(String, Range)> {
         let lookup_id = binding_field_name_to_id(field_name);
-        self.matching_layout_entries(module_root, layout_name)
+        let entries = self.matching_layout_entries(module_root, layout_name);
+        let exact_matches: Vec<(String, Range)> = entries
+            .iter()
+            .filter_map(|(uri, data)| {
+                data.includes
+                    .iter()
+                    .find(|include| {
+                        include.id.as_deref().is_some_and(|include_id| {
+                            view_id_exact_match(include_id, &lookup_id)
+                        })
+                    })
+                    .map(|include| (uri.clone(), include.tag_range))
+            })
+            .collect();
+        if !exact_matches.is_empty() {
+            return exact_matches;
+        }
+
+        let normalized_matches: Vec<(String, Range)> = entries
             .into_iter()
             .filter_map(|(uri, data)| {
                 data.includes
                     .iter()
                     .find(|include| {
                         include.id.as_deref().is_some_and(|include_id| {
-                            view_id_matches_lookup(include_id, &lookup_id)
+                            !view_id_exact_match(include_id, &lookup_id)
+                                && view_id_normalized_match(include_id, &lookup_id)
                         })
                     })
                     .map(|include| (uri, include.tag_range))
             })
-            .collect()
+            .collect();
+        if normalized_matches.len() == 1 {
+            return normalized_matches;
+        }
+        Vec::new()
     }
 
     /// True when a generated binding class has been discovered for `class_name` in `module_root`.
