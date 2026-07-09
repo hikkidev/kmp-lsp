@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -309,4 +310,38 @@ class MainActivity {
         diags.is_empty(),
         "build-required diagnostic must clear after watcher discovery: {diags:?}"
     );
+}
+
+/// Deterministic: empty discovery is never cached, so a later `build/` tree is found.
+#[test]
+fn resolve_databinding_dirs_rediscovers_after_build_dir_appears() {
+    use super::resolve_databinding_dirs;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    fs::create_dir_all(&module_root).expect("mkdir module");
+
+    let mut databinding_dirs: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+
+    let before_build = resolve_databinding_dirs(&mut databinding_dirs, &module_root);
+    assert!(before_build.is_empty(), "no build/ yet");
+    assert!(
+        !databinding_dirs.contains_key(&module_root),
+        "empty discovery must not be cached"
+    );
+
+    write_binding_java(&binding_path(&module_root), SAMPLE_BINDING_JAVA);
+
+    let after_build = resolve_databinding_dirs(&mut databinding_dirs, &module_root);
+    assert!(
+        !after_build.is_empty(),
+        "build/ and binding file exist — dirs must be discovered"
+    );
+    assert!(
+        databinding_dirs.contains_key(&module_root),
+        "non-empty discovery must be cached"
+    );
+
+    let cached = resolve_databinding_dirs(&mut databinding_dirs, &module_root);
+    assert_eq!(cached, after_build, "subsequent polls reuse cached dirs");
 }
