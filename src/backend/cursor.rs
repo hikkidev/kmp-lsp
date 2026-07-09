@@ -11,11 +11,11 @@
 
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::features::binding_receiver::{
-    bare_member_exists_on_binding_receiver, implicit_receiver_type_for_bare_member_at,
-};
 use crate::indexer::{Indexer, RequestParseCache};
 use crate::resolver::{infer_receiver_type, infer_receiver_type_at, ReceiverKind, ReceiverType};
+use crate::viewbinding::receiver::{
+    bare_member_exists_on_binding_receiver, implicit_receiver_type_for_bare_member_at,
+};
 
 /// Cursor context for identifier-based LSP features (hover, goto-def, completion).
 ///

@@ -2,14 +2,14 @@
 
 use tower_lsp::lsp_types::Url;
 
-use crate::features::binding_receiver::{
-    binding_class_for_bare_field_access, binding_class_from_receiver_type,
-    implicit_receiver_type_for_bare_member_at, is_view_binding_class_name,
-};
 use crate::indexer::live_tree::RequestParseCache;
 use crate::indexer::Indexer;
 use crate::queries::KIND_SIMPLE_IDENT;
 use crate::resolver::ReceiverType;
+use crate::viewbinding::receiver::{
+    binding_class_for_bare_field_access, binding_class_from_receiver_type,
+    implicit_receiver_type_for_bare_member_at, is_view_binding_class_name,
+};
 
 fn uri(path: &str) -> Url {
     Url::parse(&format!("file:///test{path}")).unwrap()

@@ -9,15 +9,16 @@ use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Posi
 
 use crate::backend::cursor::CursorContext;
 use crate::backend::format::{format_contextual_hover, format_symbol_hover};
-use crate::features::viewbinding::{
-    binding_field_hover_at_location, binding_field_hover_for_class, resolve_expected_binding_class,
-};
 use crate::indexer::apply_type_subst;
 use crate::indexer::resolution::{
     build_subst_map, enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext,
     WorkspaceRead,
 };
 use crate::resolver::ReceiverType;
+use crate::viewbinding::hover::{binding_field_access_hover, fallback_local_binding_hover};
+use crate::viewbinding::{
+    binding_field_hover_at_location, binding_field_hover_for_class, resolve_expected_binding_class,
+};
 use crate::StrExt;
 
 /// Compute a hover response for the cursor at `position` in `uri`.
@@ -43,28 +44,6 @@ pub(crate) fn compute_hover<W: WorkspaceRead>(
         return Some(hover);
     }
     regular_symbol_hover(workspace, ctx, uri, position).or_else(|| jar_loading_hint(workspace))
-}
-
-fn binding_field_access_hover<W: WorkspaceRead>(
-    workspace: &W,
-    ctx: &CursorContext,
-    uri: &Url,
-    position: Position,
-) -> Option<Hover> {
-    let indexer = workspace.as_indexer()?;
-    if ctx.word.starts_with_uppercase() {
-        return None;
-    }
-    let expected_class = crate::features::viewbinding::resolve_expected_binding_class(
-        indexer, uri, position, ctx, None,
-    )?;
-    let markdown = crate::features::viewbinding::binding_field_hover_for_class(
-        indexer,
-        uri,
-        &expected_class,
-        &ctx.word,
-    )?;
-    Some(make_markdown_hover(markdown))
 }
 
 fn contextual_lambda_hover<W: WorkspaceRead>(
@@ -153,28 +132,6 @@ fn regular_symbol_hover<W: WorkspaceRead>(
         return Some(make_markdown_hover(markdown));
     }
     fallback_local_binding_hover(workspace, ctx, uri, position.line)
-}
-
-fn fallback_local_binding_hover<W: WorkspaceRead>(
-    workspace: &W,
-    ctx: &CursorContext,
-    uri: &Url,
-    line: u32,
-) -> Option<Hover> {
-    if ctx.qualifier.is_some() {
-        return None;
-    }
-    let indexer = workspace.as_indexer()?;
-    let type_name = crate::resolver::infer::infer_variable_type_raw(indexer, &ctx.word, uri)?;
-    let signature = format!("{} {}: {type_name}", hover_binding_keyword(uri), ctx.word);
-    let (leaf, qualifier) = type_detail_parts(&type_name);
-    let detail = resolve_hover_markdown(workspace, leaf, qualifier, uri, line)
-        .or_else(|| crate::stdlib::hover(leaf));
-    Some(make_markdown_hover(format_contextual_hover(
-        &signature,
-        uri.path(),
-        detail.as_deref(),
-    )))
 }
 
 fn resolve_hover_markdown<W: WorkspaceRead>(

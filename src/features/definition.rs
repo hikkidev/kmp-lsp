@@ -8,10 +8,10 @@ use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Url};
 
 use crate::backend::cursor::CursorContext;
 use crate::features::traits::{DocumentAccess, SearchAccess, SymbolIndex};
-use crate::features::viewbinding;
 use crate::indexer::IndexRead;
 use crate::parser::parse_by_extension;
 use crate::rg;
+use crate::viewbinding::navigation;
 use crate::viewbinding::ViewBindingIndex;
 
 // ─── Response helpers ─────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ fn remap_definition_response<I: IndexRead + ViewBindingIndex>(
 ) -> Option<GotoDefinitionResponse> {
     let response = response?;
     let locations = locations_from_response(response);
-    let remapped = viewbinding::remap_generated_binding_definitions(index, locations);
+    let remapped = navigation::remap_generated_binding_definitions(index, locations);
     locs_to_opt_response(remapped)
 }
 

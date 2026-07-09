@@ -4,8 +4,8 @@ use super::cursor::CursorContext;
 use super::Backend;
 use crate::features::definition as def;
 use crate::features::implementation as imp;
-use crate::features::viewbinding;
 use crate::viewbinding::is_layout_xml_path;
+use crate::viewbinding::navigation;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 impl Backend {
@@ -22,7 +22,7 @@ impl Backend {
             .is_ok_and(|path| is_layout_xml_path(&path))
         {
             if let Some(response) =
-                viewbinding::find_layout_xml_definition(&*self.indexer, uri, position)
+                navigation::find_layout_xml_definition(&*self.indexer, uri, position)
             {
                 return Ok(Some(response));
             }
@@ -36,7 +36,7 @@ impl Backend {
         };
 
         if let Some(response) =
-            viewbinding::find_binding_field_definition(&self.indexer, uri, position, &ctx)
+            navigation::find_binding_field_definition(&self.indexer, uri, position, &ctx)
         {
             return Ok(self.rewrite_jar_targets_off_thread(Some(response)).await);
         }
@@ -58,7 +58,7 @@ impl Backend {
             .is_ok_and(|path| is_layout_xml_path(&path))
         {
             if let Some(response) =
-                viewbinding::find_layout_xml_implementation(&*self.indexer, uri, position)
+                navigation::find_layout_xml_implementation(&*self.indexer, uri, position)
             {
                 return Ok(self.rewrite_jar_targets_off_thread(Some(response)).await);
             }

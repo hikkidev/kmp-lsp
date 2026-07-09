@@ -56,7 +56,7 @@ impl Backend {
             if crate::viewbinding::is_layout_xml_path(&path) {
                 log::info!("viewbinding: references on layout xml uri={uri}");
                 let mut parse_cache = crate::indexer::RequestParseCache::new();
-                let locations = crate::features::viewbinding::find_layout_xml_references(
+                let locations = crate::viewbinding::find_layout_xml_references(
                     &self.indexer,
                     &mut parse_cache,
                     uri,
@@ -83,7 +83,7 @@ impl Backend {
             return Ok(None);
         };
 
-        if let Some(expected_class) = crate::features::viewbinding::resolve_expected_binding_class(
+        if let Some(expected_class) = crate::viewbinding::resolve_expected_binding_class(
             &self.indexer,
             uri,
             position,
@@ -91,14 +91,14 @@ impl Backend {
             Some(&mut parse_cache),
         ) {
             if !ctx.word.starts_with_uppercase()
-                && crate::features::viewbinding::binding_field_in_generated_java(
+                && crate::viewbinding::binding_field_in_generated_java(
                     &self.indexer,
                     &expected_class,
                     &ctx.word,
                     uri,
                 )
             {
-                let locations = crate::features::viewbinding::find_binding_field_references(
+                let locations = crate::viewbinding::find_binding_field_references(
                     &self.indexer,
                     &mut parse_cache,
                     &expected_class,

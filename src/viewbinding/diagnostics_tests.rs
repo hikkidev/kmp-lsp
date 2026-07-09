@@ -6,10 +6,8 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::{DiagnosticSeverity, Url};
 
-use crate::features::viewbinding_diagnostics::{
-    stale_binding_field_diagnostics, viewbinding_import_diagnostics,
-};
 use crate::indexer::Indexer;
+use crate::viewbinding::{stale_binding_field_diagnostics, viewbinding_import_diagnostics};
 
 const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"

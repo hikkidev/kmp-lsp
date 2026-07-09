@@ -16,10 +16,10 @@ use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, SymbolKin
 use crate::backend::cursor::CursorContext;
 use crate::features::definition::locs_to_opt_response;
 use crate::features::traits::{DocumentAccess, SearchAccess, SymbolIndex};
-use crate::features::viewbinding;
 use crate::indexer::IndexRead;
 use crate::rg;
 use crate::types::FileData;
+use crate::viewbinding::navigation;
 use crate::viewbinding::ViewBindingIndex;
 
 /// Find all implementations/subtypes of the symbol under the cursor at `uri`.
@@ -33,7 +33,7 @@ pub(crate) async fn find_implementation(
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
-    if let Some(response) = viewbinding::find_binding_implementation(index, ctx, uri, position) {
+    if let Some(response) = navigation::find_binding_implementation(index, ctx, uri, position) {
         return Some(response);
     }
 

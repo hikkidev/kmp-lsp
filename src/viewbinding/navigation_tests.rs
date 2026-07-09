@@ -10,7 +10,9 @@ use crate::backend::cursor::CursorContext;
 use crate::features::definition::find_definition;
 use crate::features::hover::compute_hover;
 use crate::features::implementation::find_implementation;
-use crate::features::viewbinding::{
+use crate::indexer::{Indexer, RequestParseCache};
+use crate::parser::nullable_at_line;
+use crate::viewbinding::{
     binding_field_hover_for_class, binding_field_in_generated_java, binding_field_in_live_layout,
     find_binding_field_definition, find_binding_field_references, find_binding_implementation,
     find_layout_xml_definition, find_layout_xml_implementation, find_layout_xml_references,
@@ -18,8 +20,6 @@ use crate::features::viewbinding::{
     normalize_reference_location_to_utf16_for_test, remap_generated_binding_definitions,
     resolve_expected_binding_class, short_type_name,
 };
-use crate::indexer::{Indexer, RequestParseCache};
-use crate::parser::nullable_at_line;
 use crate::viewbinding::{binding_field_name_to_id, binding_id_to_field_name};
 
 async fn binding_field_references_for_test(

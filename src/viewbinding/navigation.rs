@@ -10,13 +10,13 @@ use std::path::Path;
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, SymbolKind, Url};
 use tree_sitter::Tree;
 
-use crate::backend::cursor::CursorContext;
-use crate::backend::format::format_contextual_hover;
-use crate::features::binding_receiver::{
+use super::receiver::{
     binding_class_for_bare_field_access, binding_class_for_receiver_chain,
     binding_class_from_receiver_type, receiver_matches_binding_class,
     receiver_type_for_binding_field_reference,
 };
+use crate::backend::cursor::CursorContext;
+use crate::backend::format::format_contextual_hover;
 use crate::features::definition::locs_to_opt_response;
 use crate::features::references::{
     find_references_scoped_to_files, find_references_with_qualifier,
@@ -900,5 +900,5 @@ pub(crate) fn view_id_live_for_binding_field(
 }
 
 #[cfg(test)]
-#[path = "viewbinding_tests.rs"]
+#[path = "navigation_tests.rs"]
 mod tests;

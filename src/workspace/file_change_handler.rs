@@ -10,11 +10,9 @@ use crate::backend::helpers::{is_xml_uri, syntax_diagnostics};
 use crate::features::call_arg_diagnostics::call_arg_diagnostics;
 use crate::features::fill_when::when_diagnostics;
 use crate::features::nullable_call_diagnostics::nullable_dot_call_diagnostics;
-use crate::features::viewbinding_diagnostics::{
-    stale_binding_field_diagnostics, viewbinding_import_diagnostics,
-};
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::Indexer;
+use crate::viewbinding::{stale_binding_field_diagnostics, viewbinding_import_diagnostics};
 
 pub(crate) struct FileChangeHandler {
     indexer: Arc<Indexer>,

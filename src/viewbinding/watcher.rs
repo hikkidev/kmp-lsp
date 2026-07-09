@@ -240,5 +240,5 @@ fn snapshot_is_newer_or_equal(
 }
 
 #[cfg(test)]
-#[path = "databinding_watcher_tests.rs"]
+#[path = "watcher_tests.rs"]
 mod tests;

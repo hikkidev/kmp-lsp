@@ -408,5 +408,5 @@ fn pure_field_chain(receiver_node: &Node<'_>, bytes: &[u8]) -> Option<Vec<String
 }
 
 #[cfg(test)]
-#[path = "binding_receiver_tests.rs"]
+#[path = "receiver_tests.rs"]
 mod tests;

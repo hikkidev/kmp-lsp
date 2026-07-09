@@ -15,7 +15,6 @@ pub(crate) mod actions;
 pub(crate) mod capabilities;
 pub(crate) mod commands;
 pub(crate) mod cursor;
-pub(crate) mod databinding_watcher;
 pub(crate) mod format;
 pub(crate) mod git_watcher;
 pub(crate) mod handlers;
@@ -141,7 +140,7 @@ impl LanguageServer for Backend {
             );
         }
 
-        let watcher_handle = databinding_watcher::spawn_databinding_watcher(
+        let watcher_handle = crate::viewbinding::spawn_databinding_watcher(
             Arc::clone(&self.indexer),
             self.event_tx.clone(),
         );

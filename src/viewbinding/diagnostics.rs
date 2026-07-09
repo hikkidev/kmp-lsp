@@ -17,10 +17,8 @@ use crate::viewbinding::{
 use crate::Language;
 use crate::StrExt;
 
-use super::binding_receiver::{
-    binding_class_for_bare_field_access, binding_class_for_field_access,
-};
-use super::viewbinding::view_id_live_for_binding_field;
+use super::navigation::view_id_live_for_binding_field;
+use super::receiver::{binding_class_for_bare_field_access, binding_class_for_field_access};
 
 const DIAGNOSTIC_SOURCE: &str = "kmp-lsp";
 
@@ -334,5 +332,5 @@ fn node_to_range(node: tree_sitter::Node, bytes: &[u8]) -> Range {
 }
 
 #[cfg(test)]
-#[path = "viewbinding_diagnostics_tests.rs"]
+#[path = "diagnostics_tests.rs"]
 mod tests;

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::backend::databinding_watcher::spawn_databinding_watcher_with_interval;
 use crate::indexer::Indexer;
+use crate::viewbinding::watcher::spawn_databinding_watcher_with_interval;
 use crate::viewbinding::{DatabindingWatcherHandle, DatabindingWatcherState};
 use crate::workspace::Event;
 
@@ -229,7 +229,7 @@ async fn rapid_binding_writes_coalesce_to_one_rediscovery() {
 async fn watcher_clears_build_required_import_diagnostic_after_discovery() {
     use tower_lsp::lsp_types::Url;
 
-    use crate::features::viewbinding_diagnostics::viewbinding_import_diagnostics;
+    use crate::viewbinding::viewbinding_import_diagnostics;
 
     const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
