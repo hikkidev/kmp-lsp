@@ -83,8 +83,12 @@ impl CursorContext {
 
         let mut qualifier = qualifier;
         let contextual = if let Some(receiver_type) = implicit_this_receiver {
-            qualifier = Some("this".to_string());
-            Some(receiver_type)
+            if bare_member_exists_on_receiver(indexer, uri, &receiver_type, &word) {
+                qualifier = Some("this".to_string());
+                Some(receiver_type)
+            } else {
+                None
+            }
         } else if is_contextual {
             let name: &str = qualifier.as_deref().unwrap_or(&word);
             infer_receiver_type(indexer, ReceiverKind::Contextual { name, position }, uri)
@@ -153,4 +157,31 @@ fn implicit_receiver_type_for_bare_member(
         ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
         ThisContext::InsideReceiver | ThisContext::NotFound => None,
     }
+}
+
+fn bare_member_exists_on_receiver(
+    indexer: &Indexer,
+    uri: &Url,
+    receiver_type: &ReceiverType,
+    member_name: &str,
+) -> bool {
+    if !member_name
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_lowercase())
+    {
+        return false;
+    }
+    let binding_class = receiver_type.leaf.as_str();
+    if binding_class.ends_with("Binding") {
+        return crate::indexer::binding_field_type(indexer, Some(uri), binding_class, member_name)
+            .is_some();
+    }
+    crate::resolver::infer::find_field_type_in_class_from(
+        indexer,
+        &receiver_type.leaf,
+        member_name,
+        uri,
+    )
+    .is_some()
 }
