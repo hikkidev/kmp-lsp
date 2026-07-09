@@ -245,7 +245,7 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
 /// property delegate on a single line.
 fn infer_view_binding_delegate_type(line: &str, var_name: &str) -> Option<String> {
     let delegate_pattern = format!("{var_name} by viewBinding");
-    if !line.contains(&delegate_pattern) {
+    if !line_contains_word_boundary(line, &delegate_pattern) {
         return None;
     }
     let trimmed = line.trim_start();
@@ -257,12 +257,36 @@ fn infer_view_binding_delegate_type(line: &str, var_name: &str) -> Option<String
     extract_binding_type_from_view_binding_delegate(after_view_binding)
 }
 
+fn line_contains_word_boundary(line: &str, pattern: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(relative) = line[search_start..].find(pattern) {
+        let start = search_start + relative;
+        let end = start + pattern.len();
+        let before_ok = start == 0
+            || !line.as_bytes()[start - 1].is_ascii_alphanumeric()
+                && line.as_bytes()[start - 1] != b'_';
+        let after_ok = end >= line.len()
+            || !line.as_bytes()[end].is_ascii_alphanumeric() && line.as_bytes()[end] != b'_';
+        if before_ok && after_ok {
+            return true;
+        }
+        search_start = end;
+    }
+    false
+}
+
 fn extract_binding_type_from_view_binding_delegate(after_view_binding: &str) -> Option<String> {
     let trimmed = after_view_binding.trim_start();
 
     if let Some(generic_args) = trimmed.strip_prefix('<') {
         let type_name = extract_type_with_generics(generic_args);
-        if type_name.ends_with("Binding") && type_name.starts_with_uppercase() {
+        if type_name.ends_with("Binding")
+            && type_name.len() > "Binding".len()
+            && type_name[..type_name.len() - "Binding".len()]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_uppercase())
+        {
             return Some(type_name);
         }
     }
@@ -273,7 +297,13 @@ fn extract_binding_type_from_view_binding_delegate(after_view_binding: &str) -> 
         let before_reference = inside[..colon_pos].trim();
         let binding_name = before_reference.dotted_ident_prefix();
         let base = binding_name.last_segment().trim();
-        if base.ends_with("Binding") && base.starts_with_uppercase() {
+        if base.ends_with("Binding")
+            && base.len() > "Binding".len()
+            && base[..base.len() - "Binding".len()]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_uppercase())
+        {
             return Some(base.to_owned());
         }
     }

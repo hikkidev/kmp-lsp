@@ -331,6 +331,7 @@ pub(crate) fn binding_field_in_live_layout_by_name(
 }
 
 /// True when `field_name` maps to a live `@+id` or `<include>` in the paired layout.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn binding_field_in_live_layout(
     index: &Indexer,
     expected_binding_class: &str,

@@ -126,6 +126,23 @@ fn binding_name_mapping_roundtrip_and_edge_cases() {
 }
 
 #[test]
+fn module_root_derivation_uses_last_src_or_build_segment() {
+    let generated =
+        PathBuf::from("home/user/src/myproject/app/build/generated/databinding/FooBarBinding.java");
+    assert_eq!(
+        module_root_for_generated_file(&generated),
+        Some(PathBuf::from("home/user/src/myproject/app"))
+    );
+
+    let source =
+        PathBuf::from("home/user/src/myproject/app/src/main/kotlin/com/example/MainActivity.kt");
+    assert_eq!(
+        module_root_for_source_file(&source),
+        Some(PathBuf::from("home/user/src/myproject/app"))
+    );
+}
+
+#[test]
 fn module_root_derivation_for_generated_and_source_paths() {
     let generated = PathBuf::from("project/app/build/generated/databinding/FooBarBinding.java");
     assert_eq!(

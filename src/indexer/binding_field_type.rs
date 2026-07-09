@@ -57,17 +57,14 @@ pub(crate) fn infer_bare_binding_field_type(
     ) {
         return None;
     }
-    let lines = index
-        .mem_lines_for(uri.as_str())
-        .map(|live_lines| (*live_lines).clone())
-        .or_else(|| {
-            index
-                .files
-                .get(uri.as_str())
-                .map(|data| (*data.lines).clone())
-        })?;
+    let lines = index.mem_lines_for(uri.as_str()).or_else(|| {
+        index
+            .files
+            .get(uri.as_str())
+            .map(|file_data| file_data.lines.clone())
+    })?;
     let this_context = find_this_context_in_lines(
-        &lines,
+        lines.as_ref(),
         CursorPos {
             line: position.line as usize,
             utf16_col: position.character as usize,
@@ -107,6 +104,9 @@ pub(crate) fn binding_layout_completion_fields(
 
     for layout in &layouts {
         for view_id in &layout.view_ids {
+            if view_id.tag_name.ends_with("Fragment") {
+                continue;
+            }
             let field_name = binding_id_to_field_name(&view_id.id);
             let type_name = leaf_tag_name(&view_id.tag_name);
             push_unique_layout_field(&mut fields, &mut seen_names, field_name, type_name);
@@ -263,7 +263,12 @@ fn consensus_tag_type(tag_names: &[String]) -> Option<String> {
 }
 
 fn leaf_tag_name(tag_name: &str) -> String {
-    short_type_name(tag_name)
+    let leaf = short_type_name(tag_name);
+    if leaf == "merge" {
+        "View".to_string()
+    } else {
+        leaf
+    }
 }
 
 fn module_root_for_binding_class(
