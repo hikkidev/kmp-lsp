@@ -14,10 +14,10 @@ use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
 use crate::queries::{
     KIND_CALL_EXPR, KIND_CATCH_BLOCK, KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ,
-    KIND_ENUM_CLASS_BODY, KIND_FOR_STMT, KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS, KIND_INTERFACE_DECL,
-    KIND_LAMBDA_LIT, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_NULLABLE_TYPE, KIND_OBJECT_DECL,
-    KIND_PARAMETER, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE, KIND_USER_TYPE,
-    KIND_VAR_DECL, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
+    KIND_ENUM_CLASS_BODY, KIND_FOR_STMT, KIND_FUN_BODY, KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS,
+    KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_NULLABLE_TYPE,
+    KIND_OBJECT_DECL, KIND_PARAMETER, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE,
+    KIND_USER_TYPE, KIND_VAR_DECL, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
 };
 use crate::types::CursorPos;
 use crate::StrExt;
@@ -402,10 +402,7 @@ impl Indexer {
         var_name: &str,
         position: Position,
     ) -> Option<String> {
-        if let Some(scoped) = self.variable_type_at_from_cst(uri, var_name, position) {
-            return Some(scoped);
-        }
-        crate::resolver::infer::infer_variable_type_raw(self, var_name, uri)
+        self.variable_type_at_from_cst(uri, var_name, position)
     }
 
     fn variable_type_at_from_cst(
@@ -430,26 +427,18 @@ impl Indexer {
             .descendant_for_point_range(point, point)?;
         let bytes = doc.bytes.as_slice();
 
-        let mut node = cursor_node;
-        loop {
-            if node.kind() == KIND_FUN_DECL {
-                if let Some(parameter_type) = function_parameter_type(node, var_name, bytes) {
-                    return Some(parameter_type);
-                }
-            }
-
-            let mut previous = node.prev_sibling();
-            while let Some(sibling) = previous {
-                if let Some(local_type) = property_declaration_type(sibling, var_name, bytes) {
+        if let Some(scope_root) = enclosing_local_scope_subtree(cursor_node) {
+            for search_root in local_scope_search_roots(scope_root) {
+                if let Some(local_type) =
+                    local_type_for_name_in_subtree_before(search_root, bytes, var_name, point)
+                {
                     return Some(local_type);
                 }
-                previous = sibling.prev_sibling();
             }
+        }
 
-            let Some(parent) = node.parent() else {
-                break;
-            };
-
+        let mut node = cursor_node;
+        while let Some(parent) = node.parent() {
             if matches!(
                 parent.kind(),
                 KIND_CLASS_BODY | KIND_ENUM_CLASS_BODY | KIND_SOURCE_FILE
@@ -498,49 +487,14 @@ impl Indexer {
             return false;
         };
         let bytes = doc.bytes.as_slice();
-        let mut node = cursor_node;
-        loop {
-            if node.kind() == KIND_LAMBDA_LIT
-                && node
-                    .lambda_param_names(bytes)
-                    .iter()
-                    .any(|param| param == name)
-            {
-                return true;
-            }
-            if node.kind() == KIND_FUN_DECL
-                && function_value_parameter_names(node, bytes)
-                    .iter()
-                    .any(|param| param == name)
-            {
-                return true;
-            }
-            if (node.kind() == KIND_FOR_STMT
-                || node.kind() == KIND_CATCH_BLOCK
-                || node.kind() == KIND_WHEN_EXPR)
-                && local_binding_binds_name(node, bytes, name)
-            {
-                return true;
-            }
-            let Some(parent) = node.parent() else {
-                return false;
-            };
-            let parent_holds_members = matches!(
-                parent.kind(),
-                KIND_CLASS_BODY | KIND_ENUM_CLASS_BODY | KIND_SOURCE_FILE
-            );
-            if parent_holds_members {
-                return false;
-            }
-            let mut previous = node.prev_sibling();
-            while let Some(sibling) = previous {
-                if local_binding_binds_name(sibling, bytes, name) {
+        if let Some(scope_root) = enclosing_local_scope_subtree(cursor_node) {
+            for search_root in local_scope_search_roots(scope_root) {
+                if local_name_bound_in_subtree(search_root, bytes, name) {
                     return true;
                 }
-                previous = sibling.prev_sibling();
             }
-            node = parent;
         }
+        false
     }
 
     /// Find the name of the innermost enclosing class/interface/object
@@ -831,6 +785,101 @@ fn binding_type_from_inflate_call(
         .next()
         .filter(|name| name.ends_with("Binding") && name.starts_with_uppercase())?;
     Some(binding_name.to_string())
+}
+
+/// Innermost lambda or function body between `cursor_node` and the nearest
+/// class/type-body boundary — the scope that governs local shadowing.
+fn enclosing_local_scope_subtree(cursor_node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut node = cursor_node;
+    let mut candidate = None;
+    loop {
+        match node.kind() {
+            KIND_LAMBDA_LIT => candidate = Some(node),
+            KIND_FUN_DECL => {
+                if let Some(body) = node.first_child_of_kind(KIND_FUN_BODY) {
+                    candidate = Some(body);
+                }
+            }
+            _ => {}
+        }
+        let Some(parent) = node.parent() else {
+            return candidate;
+        };
+        if matches!(
+            parent.kind(),
+            KIND_CLASS_BODY | KIND_ENUM_CLASS_BODY | KIND_SOURCE_FILE
+        ) {
+            return candidate;
+        }
+        node = parent;
+    }
+}
+
+fn local_scope_search_roots(scope_root: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+    if scope_root.kind() == KIND_FUN_BODY {
+        if let Some(function_declaration) = scope_root.parent() {
+            return vec![function_declaration, scope_root];
+        }
+    }
+    vec![scope_root]
+}
+
+fn local_name_bound_in_subtree(node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    if local_binding_binds_name(node, bytes, name) {
+        return true;
+    }
+    if node.kind() == KIND_FUN_DECL
+        && function_value_parameter_names(node, bytes)
+            .iter()
+            .any(|parameter| parameter == name)
+    {
+        return true;
+    }
+    if node.kind() == KIND_LAMBDA_LIT
+        && node
+            .lambda_param_names(bytes)
+            .iter()
+            .any(|parameter| parameter == name)
+    {
+        return true;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if local_name_bound_in_subtree(child, bytes, name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn local_type_for_name_in_subtree_before(
+    node: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    name: &str,
+    before: Point,
+) -> Option<String> {
+    if node.start_position() >= before {
+        return None;
+    }
+    if node.kind() == KIND_FUN_DECL {
+        if let Some(parameter_type) = function_parameter_type(node, name, bytes) {
+            return Some(parameter_type);
+        }
+    }
+    if let Some(local_type) = property_declaration_type(node, name, bytes) {
+        return Some(local_type);
+    }
+    let mut cursor = node.walk();
+    let mut latest_match = None;
+    for child in node.children(&mut cursor) {
+        if child.start_position() >= before {
+            continue;
+        }
+        if let Some(found) = local_type_for_name_in_subtree_before(child, bytes, name, before) {
+            latest_match = Some(found);
+        }
+    }
+    latest_match
 }
 
 /// True when `node` introduces a local binding for `name` (val/var, for, catch, when-subject, destructuring).

@@ -759,6 +759,47 @@ fn utf16_position_in(source: &str, needle: &str) -> (usize, usize) {
 }
 
 #[test]
+fn name_shadowed_by_forward_local_in_same_lambda() {
+    let source = r#"fun demo(binding: FooBarBinding) {
+    with(binding) {
+        title
+        val title = "local"
+    }
+}
+"#;
+    let (file_uri, indexer) = live_indexed("/forward_shadow.kt", source);
+    let (line, utf16_column) = utf16_position_in(source, "        title\n");
+    assert!(
+        indexer.name_shadowed_by_local_declaration(&file_uri, line, utf16_column, "title"),
+        "a later local in the same lambda must shadow even before its declaration line"
+    );
+}
+
+#[test]
+fn variable_type_at_ignores_competing_binding_in_other_file() {
+    let source = "package com.example\nclass Foo {\n    val binding: FooLayoutBinding = error(\"x\")\n    fun bar() { binding }\n}";
+    let decoy_source = "package com.example.other\nclass WrongAdapter {\n    val binding: WrongBinding get() = error(\"wrong\")\n}";
+
+    let file_uri = uri("/Foo.kt");
+    let indexer = Indexer::new();
+    indexer.index_content(&file_uri, source);
+    indexer.index_content(&uri("/Wrong.kt"), decoy_source);
+    indexer.set_live_lines(&file_uri, source);
+    indexer.store_live_tree(&file_uri, source);
+
+    let (line, utf16_column) = utf16_position_in(source, "binding");
+    let position = tower_lsp::lsp_types::Position {
+        line: line as u32,
+        character: utf16_column as u32,
+    };
+    assert_eq!(
+        indexer.variable_type_at(&file_uri, "binding", position),
+        Some("FooLayoutBinding".into()),
+        "scoped type lookup must resolve the enclosing class member, not a competing file-global binding"
+    );
+}
+
+#[test]
 fn name_shadowed_by_for_loop_variable() {
     let source = r#"fun demo() {
     for (title in listOf("a")) {
