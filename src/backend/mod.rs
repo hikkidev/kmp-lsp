@@ -59,6 +59,8 @@ impl Backend {
         indexer.set_enrichment_handle(handle);
         let binding_handle = crate::indexer::spawn_binding_discovery_worker(Arc::clone(&indexer));
         indexer.set_binding_discovery_handle(binding_handle);
+        let layout_handle = crate::indexer::spawn_layout_indexing_worker(Arc::clone(&indexer));
+        indexer.set_layout_indexing_handle(layout_handle);
 
         Self {
             client,
@@ -146,6 +148,9 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        if let Ok(watcher) = self.indexer.databinding_watcher.read() {
+            watcher.cancel();
+        }
         // Spawn cache write in background so the LSP shutdown response is sent
         // immediately. The process stays alive until the `exit` notification
         // arrives, giving the write enough time to complete for typical caches.

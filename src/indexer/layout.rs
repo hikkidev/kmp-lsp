@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use dashmap::DashSet;
 use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Node, Parser};
 
@@ -544,9 +545,15 @@ impl crate::indexer::Indexer {
 
     /// Index any layout XML files under `module_root` that are not yet in the layout side index.
     ///
-    /// Returns how many files were newly indexed. Used on-demand when bulk workspace
-    /// discovery missed layouts (gitignore/fd exclusions) but navigation needs them.
+    /// Read-path callers enqueue background indexing and return 0. Tests and the layout
+    /// worker call [`Indexer::index_module_layouts_blocking`] directly.
     pub(crate) fn ensure_module_layouts_indexed(&self, module_root: &Path) -> usize {
+        self.request_module_layout_indexing(module_root.to_path_buf());
+        0
+    }
+
+    /// Blocking layout enumeration — used by the background worker and unit tests.
+    pub(crate) fn index_module_layouts_blocking(&self, module_root: &Path) -> usize {
         if self
             .indexing_in_progress
             .load(std::sync::atomic::Ordering::Acquire)
@@ -588,6 +595,22 @@ impl crate::indexer::Indexer {
         newly_indexed
     }
 
+    pub(crate) fn set_layout_indexing_handle(&self, handle: LayoutIndexingHandle) {
+        if let Ok(mut guard) = self.layout_indexing.write() {
+            *guard = handle;
+        }
+    }
+
+    pub(crate) fn request_module_layout_indexing(&self, module_root: PathBuf) {
+        if let Ok(handle) = self.layout_indexing.read() {
+            if handle.is_noop() {
+                self.index_module_layouts_blocking(&module_root);
+                return;
+            }
+            handle.request(module_root);
+        }
+    }
+
     /// Index a single layout XML file into the layout side index.
     pub(crate) fn index_layout_content(&self, uri: &tower_lsp::lsp_types::Url, content: &str) {
         let Ok(path) = uri.to_file_path() else {
@@ -606,6 +629,91 @@ impl crate::indexer::Indexer {
         self.insert_layout_secondary_index(&uri_string, &data);
         self.request_generated_binding_discovery(components.module_root);
     }
+}
+
+// ─── Background layout indexing worker ───────────────────────────────────────
+
+struct LayoutIndexingRequest {
+    module_root: PathBuf,
+}
+
+/// Cheap handle for enqueueing per-module layout XML indexing.
+#[derive(Clone)]
+pub(crate) struct LayoutIndexingHandle {
+    sender: Option<tokio::sync::mpsc::UnboundedSender<LayoutIndexingRequest>>,
+    in_progress: Arc<DashSet<PathBuf>>,
+    rerun_requested: Arc<DashSet<PathBuf>>,
+}
+
+impl LayoutIndexingHandle {
+    pub(crate) fn noop() -> Self {
+        Self {
+            sender: None,
+            in_progress: Arc::new(DashSet::new()),
+            rerun_requested: Arc::new(DashSet::new()),
+        }
+    }
+
+    pub(crate) fn is_noop(&self) -> bool {
+        self.sender.is_none()
+    }
+
+    /// Enqueue layout indexing for `module_root`. Duplicate in-flight requests set a rerun flag.
+    pub(crate) fn request(&self, module_root: PathBuf) {
+        let Some(ref sender) = self.sender else {
+            return;
+        };
+        if self.in_progress.contains(&module_root) {
+            self.rerun_requested.insert(module_root);
+            return;
+        }
+        if !self.in_progress.insert(module_root.clone()) {
+            return;
+        }
+        let _ = sender.send(LayoutIndexingRequest { module_root });
+    }
+
+    pub(crate) fn clear(&self) {
+        self.in_progress.clear();
+        self.rerun_requested.clear();
+    }
+}
+
+/// Spawn the background layout-indexing worker. Returns a handle for read-path callers.
+pub(crate) fn spawn_layout_indexing_worker(
+    indexer: Arc<crate::indexer::Indexer>,
+) -> LayoutIndexingHandle {
+    use tokio::sync::mpsc;
+
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let in_progress = Arc::new(DashSet::new());
+    let rerun_requested = Arc::new(DashSet::new());
+    let handle = LayoutIndexingHandle {
+        sender: Some(sender.clone()),
+        in_progress: Arc::clone(&in_progress),
+        rerun_requested: Arc::clone(&rerun_requested),
+    };
+    tokio::spawn(async move {
+        while let Some(request) = receiver.recv().await {
+            let module_root = request.module_root;
+            let module_for_blocking = module_root.clone();
+            let indexer = Arc::clone(&indexer);
+            let in_progress = Arc::clone(&in_progress);
+            let rerun_requested = Arc::clone(&rerun_requested);
+            tokio::task::spawn_blocking(move || {
+                indexer.index_module_layouts_blocking(&module_for_blocking);
+            })
+            .await
+            .ok();
+            in_progress.remove(&module_root);
+            if rerun_requested.remove(&module_root).is_some()
+                && in_progress.insert(module_root.clone())
+            {
+                let _ = sender.send(LayoutIndexingRequest { module_root });
+            }
+        }
+    });
+    handle
 }
 
 #[cfg(test)]

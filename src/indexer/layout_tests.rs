@@ -321,7 +321,7 @@ fn ensure_module_layouts_indexed_retries_until_layouts_exist() {
 
     let indexer = Indexer::new();
     assert_eq!(
-        indexer.ensure_module_layouts_indexed(&module_root),
+        indexer.index_module_layouts_blocking(&module_root),
         0,
         "no layout dirs yet"
     );
@@ -335,7 +335,7 @@ fn ensure_module_layouts_indexed_retries_until_layouts_exist() {
     fs::write(&layout_path, SAMPLE_LAYOUT).expect("write layout");
 
     assert_eq!(
-        indexer.ensure_module_layouts_indexed(&module_root),
+        indexer.index_module_layouts_blocking(&module_root),
         1,
         "layout file appeared — on-demand path must index it"
     );
@@ -344,7 +344,7 @@ fn ensure_module_layouts_indexed_retries_until_layouts_exist() {
         "module marked done once layout files exist on disk"
     );
     assert_eq!(
-        indexer.ensure_module_layouts_indexed(&module_root),
+        indexer.index_module_layouts_blocking(&module_root),
         0,
         "second call is a no-op"
     );
