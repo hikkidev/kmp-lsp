@@ -46,12 +46,14 @@ pub(crate) fn spawn_databinding_watcher_with_interval(
 
     let poll_state = Arc::clone(&state);
     tokio::spawn(async move {
-        let mut snapshots: HashMap<PathBuf, HashMap<String, BindingFileSnapshot>> = HashMap::new();
         let mut databinding_dirs: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         let mut interval = tokio::time::interval(poll_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if poll_state.is_cancelled() {
+                break;
+            }
             let module_roots = poll_state.registered_module_roots();
             if module_roots.is_empty() {
                 continue;
@@ -75,30 +77,23 @@ pub(crate) fn spawn_databinding_watcher_with_interval(
                 .collect();
             let snapshot_results = join_all(snapshot_tasks).await;
 
-            let mut reindex_tasks = Vec::new();
+            let mut republish_needed = false;
             for ((module_root, dirs), snapshot_result) in
                 module_dirs.into_iter().zip(snapshot_results)
             {
+                if poll_state.is_cancelled() {
+                    break;
+                }
                 let current_snapshot = snapshot_result.unwrap_or_default();
-                let changed = match snapshots.get(&module_root) {
-                    Some(previous) => previous != &current_snapshot,
-                    None => snapshot_differs_from_index(&indexer, &module_root, &current_snapshot),
-                };
-                if !changed {
+                if !snapshot_differs_from_index(&indexer, &module_root, &current_snapshot) {
                     continue;
                 }
-                snapshots.insert(module_root.clone(), current_snapshot);
-                let indexer = Arc::clone(&indexer);
-                let module = module_root.clone();
-                let dirs_for_blocking = dirs.clone();
-                reindex_tasks.push(tokio::task::spawn_blocking(move || {
-                    indexer.index_generated_bindings(&module, Some(&dirs_for_blocking));
-                }));
+                indexer.request_generated_binding_discovery_with_dirs(module_root, Some(dirs));
+                republish_needed = true;
             }
 
-            if !reindex_tasks.is_empty() {
-                join_all(reindex_tasks).await;
-                let _ = republish_tx.try_send(Event::RepublishOpenFileDiagnostics);
+            if republish_needed && !poll_state.is_cancelled() {
+                let _ = republish_tx.send(Event::RepublishOpenFileDiagnostics).await;
             }
         }
     });
