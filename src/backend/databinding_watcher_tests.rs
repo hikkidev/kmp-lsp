@@ -313,6 +313,30 @@ class MainActivity {
 }
 
 /// Deterministic: empty discovery is never cached, so a later `build/` tree is found.
+#[tokio::test]
+async fn watcher_finds_bindings_under_intermediates_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let binding_path = module_root.join(
+        "build/intermediates/data_binding/debug/com/example/app/databinding/FooBarBinding.java",
+    );
+    write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
+
+    let indexer = Arc::new(Indexer::new());
+    let (republish_tx, _republish_rx) = mpsc::channel(4);
+    let handle = spawn_test_watcher(Arc::clone(&indexer), republish_tx);
+    indexer.set_databinding_watcher_handle(handle.clone());
+    handle.watch_module(&module_root);
+
+    let qualified_key = "com.example.app.databinding.FooBarBinding";
+    let indexer_for_poll = Arc::clone(&indexer);
+    poll_until(
+        move || indexer_for_poll.qualified.contains_key(qualified_key),
+        Duration::from_secs(5),
+    )
+    .await;
+}
+
 #[test]
 fn resolve_databinding_dirs_rediscovers_after_build_dir_appears() {
     use super::resolve_databinding_dirs;

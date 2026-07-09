@@ -159,7 +159,7 @@ fn discover_databinding_dirs(module_root: &Path) -> Vec<PathBuf> {
             let Some(name) = entry.file_name().to_str() else {
                 return true;
             };
-            !matches!(name, "intermediates" | "tmp" | "kotlin")
+            !matches!(name, "tmp" | "kotlin")
         })
         .filter_map(Result::ok)
     {

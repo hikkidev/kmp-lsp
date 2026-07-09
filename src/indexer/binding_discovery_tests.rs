@@ -283,6 +283,52 @@ fn watcher_path_matcher_requires_build_and_databinding_segments() {
 }
 
 #[test]
+fn restore_generated_bindings_from_cache_registers_watcher_module() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("workspace");
+    fs::create_dir_all(&root).expect("mkdir workspace");
+
+    let module_root = temp.path().join("app");
+    let binding_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
+    write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
+
+    let watcher_state = Arc::new(crate::indexer::DatabindingWatcherState::new());
+    let warm_indexer = Indexer::new();
+    warm_indexer.set_databinding_watcher_handle(crate::indexer::DatabindingWatcherHandle::new(
+        Arc::clone(&watcher_state),
+    ));
+    warm_indexer.index_generated_bindings(&module_root);
+
+    with_xdg_cache(temp.path(), || {
+        save_cache(
+            &root,
+            &warm_indexer.files,
+            &warm_indexer.content_hashes,
+            &warm_indexer.library_uris,
+            &warm_indexer.layouts,
+            &warm_indexer.generated_bindings,
+            true,
+            true,
+        );
+
+        let loaded = try_load_cache(&root).expect("cache loaded");
+        let restored_indexer = Indexer::new();
+        restored_indexer.set_databinding_watcher_handle(
+            crate::indexer::DatabindingWatcherHandle::new(Arc::clone(&watcher_state)),
+        );
+        restored_indexer.restore_generated_bindings_from_cache(&loaded.generated_bindings);
+
+        assert!(
+            watcher_state
+                .registered_module_roots()
+                .contains(&module_root),
+            "cache restore must register the module with the databinding watcher"
+        );
+    });
+}
+
+#[test]
 fn generated_bindings_cache_roundtrip() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("workspace");

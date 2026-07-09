@@ -723,6 +723,9 @@ impl super::Indexer {
                         entries: fresh_entries,
                     }),
                 );
+                if let Ok(watcher) = self.databinding_watcher.read() {
+                    watcher.watch_module(&module_root);
+                }
             }
 
             if needs_rediscovery || entries_empty {
