@@ -112,13 +112,14 @@ impl Backend {
             }
         }
 
-        let locations = crate::features::references::find_references_with_qualifier(
+        let locations = crate::features::references::find_references_with_qualifier_cached(
             &ctx.word,
             ctx.qualifier.as_deref(),
             uri,
             position.line,
             params.context.include_declaration,
             &*self.indexer,
+            Some(&mut parse_cache),
         )
         .await;
 
