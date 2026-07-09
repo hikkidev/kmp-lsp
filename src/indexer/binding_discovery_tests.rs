@@ -253,6 +253,37 @@ fn generated_binding_by_class_index_supports_import_lookup() {
 }
 
 #[test]
+fn workspace_files_importing_binding_class_lists_importers_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let binding_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
+    write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
+
+    let importer_path = module_root.join("src/main/kotlin/com/example/Importer.kt");
+    let non_importer_path = module_root.join("src/main/kotlin/com/example/Noise.kt");
+    fs::create_dir_all(importer_path.parent().unwrap()).expect("mkdir sources");
+    let importer_source =
+        "package com.example\nimport com.example.app.databinding.FooBarBinding\nclass Importer\n";
+    let noise_source = "package com.example\nclass Noise { val title = \"x\" }\n";
+    fs::write(&importer_path, importer_source).expect("write importer");
+    fs::write(&non_importer_path, noise_source).expect("write noise");
+
+    let indexer = Indexer::new();
+    indexer.index_generated_bindings(&module_root);
+    let importer_uri = Url::from_file_path(&importer_path).expect("importer uri");
+    let noise_uri = Url::from_file_path(&non_importer_path).expect("noise uri");
+    indexer.index_content(&importer_uri, importer_source);
+    indexer.index_content(&noise_uri, noise_source);
+
+    let scope_files =
+        indexer.workspace_files_importing_binding_class("FooBarBinding", &importer_uri);
+    assert_eq!(scope_files.len(), 1);
+    assert!(scope_files[0].ends_with("Importer.kt"));
+    assert!(!scope_files[0].ends_with("Noise.kt"));
+}
+
+#[test]
 fn layouts_for_binding_class_pairs_by_module_and_orders_default_first() {
     let indexer = Indexer::new();
     let module_root = PathBuf::from("app");

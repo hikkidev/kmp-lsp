@@ -779,6 +779,109 @@ impl super::Indexer {
             .unwrap_or_default()
     }
 
+    /// Fully-qualified name for a generated binding class as seen from `source_uri`.
+    pub(crate) fn binding_class_fqn_for_source(
+        &self,
+        class_name: &str,
+        source_uri: &Url,
+    ) -> Option<String> {
+        if let Some(binding_file_uri) =
+            self.generated_binding_file_uri_for_source(source_uri, class_name)
+        {
+            let file_data = self.file_data_for(&binding_file_uri)?;
+            let package = file_data.package.as_deref()?;
+            return Some(format!("{package}.{class_name}"));
+        }
+        let file_data = self.file_data_for(source_uri.as_str())?;
+        let class_suffix = format!(".{class_name}");
+        let import = file_data.imports.iter().find(|import| {
+            !import.is_star
+                && import.full_path.ends_with(&class_suffix)
+                && (import.local_name == class_name
+                    || import
+                        .full_path
+                        .rsplit_once('.')
+                        .is_some_and(|(_, simple)| simple == class_name))
+        })?;
+        Some(import.full_path.clone())
+    }
+
+    /// Workspace source files that import the binding class, for narrowing rg search.
+    pub(crate) fn workspace_files_importing_binding_class(
+        &self,
+        class_name: &str,
+        source_uri: &Url,
+    ) -> Vec<String> {
+        let Some(fqn) = self.binding_class_fqn_for_source(class_name, source_uri) else {
+            return Vec::new();
+        };
+        self.workspace_importers_of(&fqn)
+            .into_iter()
+            .filter_map(|url| url.to_file_path().ok())
+            .filter_map(|path| path.to_str().map(|path_string| path_string.to_owned()))
+            .collect()
+    }
+
+    /// Resolve the generated binding file for `class_name` as seen from `source_uri`.
+    pub(crate) fn generated_binding_file_uri_for_source(
+        &self,
+        source_uri: &Url,
+        class_name: &str,
+    ) -> Option<String> {
+        if let Some(imported) = self.generated_binding_file_uri_from_import(source_uri, class_name)
+        {
+            return Some(imported);
+        }
+        if let Some(own_module) =
+            self.generated_binding_file_uri_in_own_module(source_uri, class_name)
+        {
+            return Some(own_module);
+        }
+        let locations = self.generated_binding_locations_for_class(class_name);
+        if locations.len() == 1 {
+            Some(locations[0].file_uri.clone())
+        } else {
+            None
+        }
+    }
+
+    fn generated_binding_file_uri_from_import(
+        &self,
+        source_uri: &Url,
+        class_name: &str,
+    ) -> Option<String> {
+        let file_data = self.file_data_for(source_uri.as_str())?;
+        let class_suffix = format!(".{class_name}");
+        let import = file_data.imports.iter().find(|import| {
+            !import.is_star
+                && import.full_path.ends_with(&class_suffix)
+                && (import.local_name == class_name
+                    || import
+                        .full_path
+                        .rsplit_once('.')
+                        .is_some_and(|(_, simple)| simple == class_name))
+        })?;
+        let (import_package, _class) = import.full_path.rsplit_once('.')?;
+        for location in self.generated_binding_locations_for_class(class_name) {
+            if location.package.as_deref() == Some(import_package) {
+                return Some(location.file_uri);
+            }
+        }
+        None
+    }
+
+    fn generated_binding_file_uri_in_own_module(
+        &self,
+        source_uri: &Url,
+        class_name: &str,
+    ) -> Option<String> {
+        let path = source_uri.to_file_path().ok()?;
+        let module_root = module_root_for_source_file(&path)?;
+        let module = self.generated_bindings.get(&module_root)?;
+        let entry = module.entries.get(class_name)?;
+        Some(entry.file_uri.clone())
+    }
+
     fn insert_generated_binding_class_index(
         &self,
         entry: &GeneratedBindingEntry,

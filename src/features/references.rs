@@ -110,6 +110,36 @@ pub(crate) async fn find_references_with_qualifier(
     locations
 }
 
+/// Finds references to `name` restricted to `scope_files` (import-graph narrowing).
+pub(crate) async fn find_references_scoped_to_files(
+    name: &str,
+    uri: &Url,
+    line: u32,
+    include_decl: bool,
+    scope_files: Vec<String>,
+    index: &(impl SymbolIndex + DocumentAccess + ScopeQuery + SearchAccess + Send + Sync),
+) -> Vec<Location> {
+    let _line = line;
+    let search = ReferenceSearch {
+        uri: uri.clone(),
+        name: name.to_string(),
+        include_decl,
+        parent_class: None,
+        declared_pkg: None,
+        decl_files: scope_files,
+        owner_class: None,
+        field_owner: None,
+        field_decl_line: None,
+    };
+
+    let mut locations = rg_locations(&search, index).await;
+    locations.retain(|location| !index.is_library_uri(&location.uri));
+    if !index.is_library_uri(uri) && !crate::jar_extract::is_extracted_jar_source(uri) {
+        add_current_file_locations(index, uri, name, None, None, include_decl, &mut locations);
+    }
+    locations
+}
+
 // ─── Scope resolution ─────────────────────────────────────────────────────────
 
 /// Determine `(parent_class, declared_pkg)` scope for a `findReferences` request.

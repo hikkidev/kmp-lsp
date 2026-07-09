@@ -8,7 +8,9 @@ use tree_sitter::{Node, Tree};
 use crate::backend::cursor::CursorContext;
 use crate::backend::format::format_contextual_hover;
 use crate::features::definition::locs_to_opt_response;
-use crate::features::references::find_references_with_qualifier;
+use crate::features::references::{
+    find_references_scoped_to_files, find_references_with_qualifier,
+};
 use crate::features::traits::{DocumentAccess, SymbolIndex};
 use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte, RequestParseCache};
 use crate::indexer::NodeExt;
@@ -539,51 +541,7 @@ pub(crate) fn binding_field_hover_for_class(
 /// file at `uri`, so multi-module workspaces with same-named binding classes
 /// pick the module the file actually refers to.
 fn binding_file_uri_for_source(index: &Indexer, uri: &Url, class_name: &str) -> Option<String> {
-    if let Some(imported) = binding_file_uri_from_import(index, uri, class_name) {
-        return Some(imported);
-    }
-    if let Some(own_module) = binding_file_uri_in_own_module(index, uri, class_name) {
-        return Some(own_module);
-    }
-    binding_file_uri_if_unambiguous(index, class_name)
-}
-
-/// Match the source file's import of `class_name` against each discovered
-/// binding's Java package.
-fn binding_file_uri_from_import(index: &Indexer, uri: &Url, class_name: &str) -> Option<String> {
-    let file_data = index.file_data_for(uri.as_str())?;
-    let class_suffix = format!(".{class_name}");
-    let import = file_data.imports.iter().find(|import| {
-        !import.is_star
-            && import.local_name == class_name
-            && import.full_path.ends_with(&class_suffix)
-    })?;
-    let (import_package, _class) = import.full_path.rsplit_once('.')?;
-    for location in index.generated_binding_locations_for_class(class_name) {
-        if location.package.as_deref() == Some(import_package) {
-            return Some(location.file_uri);
-        }
-    }
-    None
-}
-
-fn binding_file_uri_in_own_module(index: &Indexer, uri: &Url, class_name: &str) -> Option<String> {
-    let path = uri.to_file_path().ok()?;
-    let module_root = module_root_for_source_file(&path)?;
-    let module = index.generated_bindings.get(&module_root)?;
-    let entry = module.entries.get(class_name)?;
-    Some(entry.file_uri.clone())
-}
-
-/// Fall back to the single workspace-wide match; `None` when the class name is
-/// ambiguous across modules (a wrong-module answer is worse than no answer).
-fn binding_file_uri_if_unambiguous(index: &Indexer, class_name: &str) -> Option<String> {
-    let locations = index.generated_binding_locations_for_class(class_name);
-    if locations.len() == 1 {
-        Some(locations[0].file_uri.clone())
-    } else {
-        None
-    }
+    index.generated_binding_file_uri_for_source(uri, class_name)
 }
 
 /// When `location` is a generated binding field, return Kotlin-style hover markdown.
@@ -775,8 +733,19 @@ pub(crate) async fn find_binding_field_references(
     line: u32,
     include_decl: bool,
 ) -> Vec<Location> {
-    let candidates =
-        find_references_with_qualifier(field_name, None, uri, line, include_decl, index).await;
+    let scope_files = index.workspace_files_importing_binding_class(expected_binding_class, uri);
+    let candidates = if scope_files.is_empty() {
+        find_references_with_qualifier(field_name, None, uri, line, include_decl, index).await
+    } else {
+        log::debug!(
+            "viewbinding: binding field refs class={} field={} scoped_to_importers={}",
+            expected_binding_class,
+            field_name,
+            scope_files.len()
+        );
+        find_references_scoped_to_files(field_name, uri, line, include_decl, scope_files, index)
+            .await
+    };
     let candidate_count = candidates.len();
 
     let verified: Vec<Location> = candidates

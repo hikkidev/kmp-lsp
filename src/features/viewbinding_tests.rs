@@ -532,6 +532,45 @@ fun use(competitor: Competitor) {
 }
 
 #[tokio::test]
+async fn binding_field_references_scope_rg_to_binding_importers() {
+    let fixture = ViewBindingFixture::build();
+    let noise_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/TitleNoise.kt");
+    fs::create_dir_all(noise_path.parent().unwrap()).expect("mkdir");
+    let noise_source = r#"package com.example
+
+class TitleNoise {
+    fun noisy() {
+        val title = "many title mentions without binding import"
+        println(title)
+    }
+}
+"#;
+    fs::write(&noise_path, noise_source).expect("write noise");
+    let noise_uri = Url::from_file_path(&noise_path).expect("noise uri");
+    fixture.indexer.index_content(&noise_uri, noise_source);
+
+    let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
+    let references = binding_field_references_for_test(
+        &fixture.indexer,
+        "FooBarBinding",
+        "title",
+        &fixture.kotlin_uri,
+        position.line,
+        false,
+    )
+    .await;
+
+    assert!(
+        references
+            .iter()
+            .all(|location| !location.uri.as_str().contains("TitleNoise.kt")),
+        "rg must not search files outside the binding import graph: {references:?}"
+    );
+}
+
+#[tokio::test]
 async fn binding_field_references_still_verify_when_id_removed_from_layout() {
     let fixture = ViewBindingFixture::build();
     let stale_layout = r#"<?xml version="1.0" encoding="utf-8"?>
