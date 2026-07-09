@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tower_lsp::lsp_types::{Position, SymbolKind, Url};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, SymbolKind, Url};
 
 use super::discovery::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
@@ -383,6 +383,28 @@ fn binding_file_uri_if_unambiguous(index: &Indexer, binding_class: &str) -> Opti
     } else {
         None
     }
+}
+
+/// Layout-derived binding fields as dot-completion items for a receiver binding class.
+pub(crate) fn binding_layout_dot_completion_items(
+    index: &Indexer,
+    from_uri: &Url,
+    binding_class: &str,
+) -> Vec<CompletionItem> {
+    if !is_view_binding_class_name(binding_class) {
+        return Vec::new();
+    }
+    binding_layout_completion_fields(index, from_uri, binding_class)
+        .into_iter()
+        .map(|field| CompletionItem {
+            label: field.name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(field.type_name),
+            sort_text: Some("01".to_owned()),
+            filter_text: Some(field.name),
+            ..Default::default()
+        })
+        .collect()
 }
 
 #[cfg(test)]

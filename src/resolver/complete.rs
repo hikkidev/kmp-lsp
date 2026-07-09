@@ -11,7 +11,7 @@ use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
 use crate::types::{CallerContext, ImportEntry, SourceSet, Visibility};
 use crate::viewbinding::{
-    binding_layout_completion_fields, infer_bare_binding_field_type, is_view_binding_class_name,
+    binding_layout_dot_completion_items, infer_bare_binding_field_type, is_view_binding_class_name,
 };
 use crate::LinesExt;
 use crate::StrExt;
@@ -880,30 +880,6 @@ fn dedup_completion_labels(items: &mut Vec<CompletionItem>) {
     items.retain(|item| {
         !seen_labels.contains(item.label.as_str()) && seen_labels.insert(item.label.clone())
     });
-}
-
-fn binding_layout_dot_completion_items(
-    indexer: &Indexer,
-    from_uri: &Url,
-    binding_class: &str,
-) -> Vec<CompletionItem> {
-    if !is_view_binding_class_name(binding_class) {
-        return Vec::new();
-    }
-    binding_layout_completion_fields(indexer, from_uri, binding_class)
-        .into_iter()
-        .map(|field| CompletionItem {
-            label: field.name.clone(),
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(field.type_name),
-            sort_text: Some(format!(
-                "0{}",
-                kind_sort_rank(Some(CompletionItemKind::FIELD))
-            )),
-            filter_text: Some(field.name),
-            ..Default::default()
-        })
-        .collect()
 }
 
 fn strip_completion_snippets(items: &mut [CompletionItem], snippets: bool) {

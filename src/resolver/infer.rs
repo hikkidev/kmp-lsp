@@ -2,9 +2,7 @@ use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
 use crate::indexer::Indexer;
 use crate::types::FileData;
-use crate::viewbinding::{
-    binding_field_type, infer_bare_binding_field_type, is_view_binding_class_name,
-};
+use crate::viewbinding::infer_bare_binding_field_type;
 use crate::LinesExt;
 use crate::StrExt;
 
@@ -572,10 +570,10 @@ pub(crate) fn find_field_type_in_class(
     class_name: &str,
     field_name: &str,
 ) -> Option<String> {
-    if is_view_binding_class_name(class_name) {
-        if let Some(field_type) = binding_field_type(indexer, None, class_name, field_name) {
-            return Some(field_type);
-        }
+    if let Some(field_type) =
+        crate::viewbinding::binding_field_type_in_class(indexer, class_name, field_name, None)
+    {
+        return Some(field_type);
     }
     find_field_type_in_class_non_binding(indexer, class_name, field_name)
 }
@@ -613,12 +611,13 @@ pub(crate) fn find_field_type_in_class_from(
     field_name: &str,
     from_uri: &Url,
 ) -> Option<String> {
-    if is_view_binding_class_name(class_name) {
-        if let Some(field_type) =
-            binding_field_type(indexer, Some(from_uri), class_name, field_name)
-        {
-            return Some(field_type);
-        }
+    if let Some(field_type) = crate::viewbinding::binding_field_type_in_class(
+        indexer,
+        class_name,
+        field_name,
+        Some(from_uri),
+    ) {
+        return Some(field_type);
     }
     for location in indexer.resolve_symbol_no_rg(class_name, from_uri) {
         if let Some(field_type) = infer_field_type_raw(indexer, location.uri.as_str(), field_name) {

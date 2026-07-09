@@ -20,7 +20,6 @@ use crate::queries::{
     KIND_USER_TYPE, KIND_VAR_DECL, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
 };
 use crate::types::CursorPos;
-use crate::viewbinding::is_view_binding_class_name;
 use crate::StrExt;
 
 /// Lines to scan backward when resolving variable types and lambda receivers from scope.
@@ -787,23 +786,9 @@ fn property_declaration_type(
     let variable_declaration = node.first_child_of_kind(KIND_VAR_DECL)?;
     type_annotation_from_node(variable_declaration, bytes)
         .or_else(|| initializer_type_from_variable_declaration(variable_declaration, bytes))
-        .or_else(|| view_binding_delegate_type_from_property(node, bytes, var_name))
-}
-
-fn view_binding_delegate_type_from_property(
-    property_node: tree_sitter::Node<'_>,
-    bytes: &[u8],
-    var_name: &str,
-) -> Option<String> {
-    let property_text = property_node.utf8_text_owned(bytes)?;
-    for line in property_text.lines() {
-        if let Some(binding_type) =
-            crate::resolver::infer_lines::infer_view_binding_delegate_type(line, var_name)
-        {
-            return Some(binding_type);
-        }
-    }
-    None
+        .or_else(|| {
+            crate::viewbinding::view_binding_delegate_type_from_property(node, bytes, var_name)
+        })
 }
 
 fn initializer_type_from_variable_declaration(
@@ -826,34 +811,7 @@ fn initializer_type_from_variable_declaration(
 }
 
 fn infer_type_from_initializer_node(node: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
-    if node.kind() == KIND_CALL_EXPR {
-        let callee = node.first_child_of_kind(KIND_NAV_EXPR).or_else(|| {
-            node.children(&mut node.walk())
-                .find(|child| child.kind() == KIND_SIMPLE_IDENT)
-        })?;
-        let callee_name = callee.utf8_text_owned(bytes)?;
-        if is_view_binding_class_name(&callee_name) {
-            return Some(callee_name);
-        }
-        if let Some(inflate_type) = binding_type_from_inflate_call(node, bytes) {
-            return Some(inflate_type);
-        }
-    }
-    None
-}
-
-fn binding_type_from_inflate_call(
-    call_node: tree_sitter::Node<'_>,
-    bytes: &[u8],
-) -> Option<String> {
-    let callee_text = call_node.utf8_text_owned(bytes)?;
-    let inflate_pos = callee_text.find("Binding.inflate")?;
-    let prefix = &callee_text[..inflate_pos + "Binding".len()];
-    let binding_name = prefix
-        .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
-        .next()
-        .filter(|name| is_view_binding_class_name(name))?;
-    Some(binding_name.to_string())
+    crate::viewbinding::binding_type_from_initializer_node(node, bytes)
 }
 
 /// Innermost lambda or function body between `cursor_node` and the nearest

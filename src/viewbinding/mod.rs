@@ -5,6 +5,7 @@ pub(crate) mod discovery;
 pub(crate) mod field_type;
 pub(crate) mod hover;
 pub(crate) mod index;
+pub(crate) mod inference;
 pub(crate) mod layout;
 pub(crate) mod navigation;
 pub(crate) mod receiver;
@@ -22,24 +23,30 @@ pub(crate) use discovery::{
     ModuleBindingsCacheEntry,
 };
 pub(crate) use field_type::{
-    binding_field_type, binding_layout_completion_fields, infer_bare_binding_field_type,
-    java_field_type_from_detail, short_type_name,
+    binding_field_type, binding_layout_completion_fields, binding_layout_dot_completion_items,
+    infer_bare_binding_field_type, java_field_type_from_detail, short_type_name,
 };
 pub(crate) use hover::{binding_field_access_hover, fallback_local_binding_hover};
 pub(crate) use index::ViewBindingIndex;
+pub(crate) use inference::{
+    binding_field_type_in_class, binding_type_from_inflate_call,
+    binding_type_from_initializer_node, infer_view_binding_delegate_type,
+    view_binding_delegate_type_from_property,
+};
 pub(crate) use layout::{
     element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
     layout_path_components, spawn_layout_indexing_worker, view_id_at_layout_position,
     LayoutCacheEntry, LayoutFileData, LayoutIndexingHandle,
 };
+#[cfg(test)]
+pub(crate) use navigation::normalize_reference_location_to_utf16_for_test;
 pub(crate) use navigation::{
     binding_field_hover_at_location, binding_field_hover_for_class,
     binding_field_in_generated_java, binding_field_in_live_layout,
     binding_field_in_live_layout_by_name, find_binding_field_definition,
     find_binding_field_references, find_binding_implementation, find_layout_xml_definition,
     find_layout_xml_implementation, find_layout_xml_references, format_binding_field_hover,
-    normalize_reference_location_to_utf16_for_test, remap_generated_binding_definitions,
-    resolve_expected_binding_class,
+    remap_generated_binding_definitions, resolve_expected_binding_class,
 };
 pub(crate) use receiver::{
     bare_member_exists_on_binding_receiver, binding_class_for_bare_field_access,
