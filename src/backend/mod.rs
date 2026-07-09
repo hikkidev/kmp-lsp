@@ -255,7 +255,7 @@ impl LanguageServer for Backend {
                         let indexer = Arc::clone(&self.indexer);
                         tokio::task::spawn(async move {
                             tokio::task::spawn_blocking(move || {
-                                indexer.index_generated_bindings(&module_root);
+                                indexer.index_generated_bindings(&module_root, None);
                             })
                             .await
                             .ok();

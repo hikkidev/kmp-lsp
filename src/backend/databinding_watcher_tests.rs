@@ -72,10 +72,10 @@ async fn watch_module_is_idempotent() {
     let handle = spawn_test_watcher(Arc::clone(&indexer), republish_tx);
 
     indexer.set_databinding_watcher_handle(handle.clone());
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
     let parse_count_after_first = indexer.parse_count.load(Ordering::Relaxed);
 
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
     let parse_count_after_second = indexer.parse_count.load(Ordering::Relaxed);
 
     assert_eq!(
@@ -95,7 +95,7 @@ async fn set_watcher_handle_registers_modules_discovered_before_install() {
     // Discovery runs against the default noop handle — exactly what happens
     // during early workspace indexing, before `initialized` installs the real
     // watcher. The module is discovered but not yet in any watcher's watched set.
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     let state = Arc::new(DatabindingWatcherState::new());
     assert!(
@@ -200,7 +200,7 @@ async fn rapid_binding_writes_coalesce_to_one_rediscovery() {
     let (republish_tx, _republish_rx) = mpsc::channel(4);
     let handle = spawn_test_watcher(Arc::clone(&indexer), republish_tx);
     indexer.set_databinding_watcher_handle(handle.clone());
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     tokio::time::sleep(Duration::from_millis(120)).await;
     let parse_count_after_initial = indexer.parse_count.load(Ordering::Relaxed);
@@ -348,7 +348,7 @@ async fn watcher_detects_gradle_clean_and_clears_index() {
     let (republish_tx, _republish_rx) = mpsc::channel(4);
     let handle = spawn_test_watcher(Arc::clone(&indexer), republish_tx);
     indexer.set_databinding_watcher_handle(handle.clone());
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     let qualified_key = "com.example.app.databinding.FooBarBinding";
     assert!(indexer.qualified.contains_key(qualified_key));

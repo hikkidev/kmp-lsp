@@ -92,7 +92,7 @@ class MainActivity {
 
         indexer.index_layout_content(&layout_uri, layout_xml);
         if include_binding_java {
-            indexer.index_generated_bindings(&module_root);
+            indexer.index_generated_bindings(&module_root, None);
         }
         indexer.index_content(&kotlin_uri, kotlin_source);
         indexer.set_live_lines(&kotlin_uri, kotlin_source);
@@ -333,7 +333,7 @@ class MainActivity {
     let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
     let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
     indexer.index_layout_content(&layout_uri, FOO_BAR_LAYOUT);
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
     indexer.index_content(&kotlin_uri, kotlin_source);
     indexer.set_live_lines(&kotlin_uri, kotlin_source);
     indexer.store_live_tree(&kotlin_uri, kotlin_source);
@@ -411,8 +411,8 @@ public final class FooBarBinding {
     let other_layout_uri = Url::from_file_path(&other_layout_path).expect("other layout uri");
     indexer.index_layout_content(&app_layout_uri, FOO_BAR_LAYOUT);
     indexer.index_layout_content(&other_layout_uri, FOO_BAR_LAYOUT);
-    indexer.index_generated_bindings(&app_module_root);
-    indexer.index_generated_bindings(&other_module_root);
+    indexer.index_generated_bindings(&app_module_root, None);
+    indexer.index_generated_bindings(&other_module_root, None);
 
     let kotlin_source_template = |package_suffix: &str| {
         format!(
@@ -498,7 +498,7 @@ fn import_diagnostic_clears_after_binding_discovered() {
     fs::write(&binding_path, FOO_BAR_BINDING_WITH_STALE).expect("write binding");
     fixture
         .indexer
-        .index_generated_bindings(&fixture.module_root);
+        .index_generated_bindings(&fixture.module_root, None);
     let diags = viewbinding_import_diagnostics(&fixture.indexer, &fixture.kotlin_uri);
     assert!(
         diags.is_empty(),

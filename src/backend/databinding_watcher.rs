@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use futures::future::join_all;
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
 
 use crate::indexer::{
-    is_generated_binding_watcher_path, DatabindingWatcherHandle, DatabindingWatcherState, Indexer,
+    discover_databinding_dirs, is_generated_binding_watcher_path, DatabindingWatcherHandle,
+    DatabindingWatcherState, Indexer,
 };
 use crate::workspace::Event;
 
@@ -51,19 +53,33 @@ pub(crate) fn spawn_databinding_watcher_with_interval(
         loop {
             interval.tick().await;
             let module_roots = poll_state.registered_module_roots();
+            if module_roots.is_empty() {
+                continue;
+            }
+
+            let mut module_dirs = Vec::with_capacity(module_roots.len());
             for module_root in module_roots {
                 let dirs = resolve_databinding_dirs(&mut databinding_dirs, &module_root);
-                let module_root_for_blocking = module_root.clone();
-                let dirs_for_blocking = dirs.clone();
-                let current_snapshot = tokio::task::spawn_blocking(move || {
-                    snapshot_databinding_binding_files(
-                        &module_root_for_blocking,
-                        &dirs_for_blocking,
-                    )
-                })
-                .await
-                .unwrap_or_default();
+                module_dirs.push((module_root, dirs));
+            }
 
+            let snapshot_tasks: Vec<_> = module_dirs
+                .iter()
+                .map(|(module_root, dirs)| {
+                    let module_root = module_root.clone();
+                    let dirs = dirs.clone();
+                    tokio::task::spawn_blocking(move || {
+                        snapshot_databinding_binding_files(&module_root, &dirs)
+                    })
+                })
+                .collect();
+            let snapshot_results = join_all(snapshot_tasks).await;
+
+            let mut reindex_tasks = Vec::new();
+            for ((module_root, dirs), snapshot_result) in
+                module_dirs.into_iter().zip(snapshot_results)
+            {
+                let current_snapshot = snapshot_result.unwrap_or_default();
                 let changed = match snapshots.get(&module_root) {
                     Some(previous) => previous != &current_snapshot,
                     None => snapshot_differs_from_index(&indexer, &module_root, &current_snapshot),
@@ -74,12 +90,14 @@ pub(crate) fn spawn_databinding_watcher_with_interval(
                 snapshots.insert(module_root.clone(), current_snapshot);
                 let indexer = Arc::clone(&indexer);
                 let module = module_root.clone();
-                let republish_tx = republish_tx.clone();
-                tokio::task::spawn_blocking(move || {
-                    indexer.index_generated_bindings(&module);
-                })
-                .await
-                .ok();
+                let dirs_for_blocking = dirs.clone();
+                reindex_tasks.push(tokio::task::spawn_blocking(move || {
+                    indexer.index_generated_bindings(&module, Some(&dirs_for_blocking));
+                }));
+            }
+
+            if !reindex_tasks.is_empty() {
+                join_all(reindex_tasks).await;
                 let _ = republish_tx.try_send(Event::RepublishOpenFileDiagnostics);
             }
         }
@@ -127,7 +145,7 @@ fn snapshot_differs_from_index(
 
 /// Resolve cached databinding dirs for `module_root`, re-discovering when the
 /// cache is empty and `build/` now exists (first poll may run before Gradle).
-fn resolve_databinding_dirs(
+pub(crate) fn resolve_databinding_dirs(
     databinding_dirs: &mut HashMap<PathBuf, Vec<PathBuf>>,
     module_root: &Path,
 ) -> Vec<PathBuf> {
@@ -148,38 +166,6 @@ fn resolve_databinding_dirs(
         databinding_dirs.insert(module_root.to_path_buf(), discovered.clone());
     }
     discovered
-}
-
-/// Discover `databinding` directories under `<module>/build/`.
-fn discover_databinding_dirs(module_root: &Path) -> Vec<PathBuf> {
-    let build_dir = module_root.join("build");
-    if !build_dir.is_dir() {
-        return Vec::new();
-    }
-
-    let mut dirs = Vec::new();
-    for entry in WalkDir::new(&build_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            if !entry.file_type().is_dir() {
-                return true;
-            }
-            let Some(name) = entry.file_name().to_str() else {
-                return true;
-            };
-            !matches!(name, "tmp" | "kotlin")
-        })
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_dir() {
-            continue;
-        }
-        if entry.file_name() == "databinding" {
-            dirs.push(entry.path().to_path_buf());
-        }
-    }
-    dirs
 }
 
 /// Snapshot class name → file metadata for `*Binding.java` under discovered databinding dirs.

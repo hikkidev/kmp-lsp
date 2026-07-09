@@ -251,11 +251,74 @@ fn binding_entry_is_newer_or_equal(
 
 // ─── Discovery ────────────────────────────────────────────────────────────────
 
-/// Walk `<module_root>/build/` for AGP-generated `*Binding.java` files.
-///
-/// Keeps the newest mtime per class name across build variants. Ignores files
-/// with the wrong package or that cannot be read.
-pub(crate) fn discover_generated_bindings(module_root: &Path) -> Vec<GeneratedBindingEntry> {
+/// Discover `databinding` directories under `<module_root>/build/`.
+pub(crate) fn discover_databinding_dirs(module_root: &Path) -> Vec<PathBuf> {
+    let build_dir = module_root.join("build");
+    if !build_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut dirs = Vec::new();
+    for entry in WalkDir::new(&build_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|walk_entry| {
+            if !walk_entry.file_type().is_dir() {
+                return true;
+            }
+            let Some(name) = walk_entry.file_name().to_str() else {
+                return true;
+            };
+            !matches!(name, "tmp" | "kotlin")
+        })
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        if entry.file_name() == "databinding" {
+            dirs.push(entry.path().to_path_buf());
+        }
+    }
+    dirs
+}
+
+fn discover_generated_bindings_in_dirs(databinding_dirs: &[PathBuf]) -> Vec<GeneratedBindingEntry> {
+    let mut by_class_name: HashMap<String, GeneratedBindingEntry> = HashMap::new();
+    for databinding_dir in databinding_dirs {
+        for entry in WalkDir::new(databinding_dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if !path.is_file() || !is_binding_java_filename(path) {
+                continue;
+            }
+            let Some((class_name, file_uri, modified_at_secs, modified_at_nanos, file_size)) =
+                read_binding_java_metadata(path)
+            else {
+                continue;
+            };
+            let candidate = GeneratedBindingEntry {
+                class_name: class_name.clone(),
+                file_uri,
+                modified_at_secs,
+                modified_at_nanos,
+                file_size,
+            };
+            match by_class_name.get(&class_name) {
+                Some(existing) if binding_entry_is_newer_or_equal(existing, &candidate) => {}
+                _ => {
+                    by_class_name.insert(class_name, candidate);
+                }
+            }
+        }
+    }
+    by_class_name.into_values().collect()
+}
+
+fn discover_generated_bindings_in_build_tree(module_root: &Path) -> Vec<GeneratedBindingEntry> {
     let build_dir = module_root.join("build");
     if !build_dir.is_dir() {
         return Vec::new();
@@ -292,6 +355,27 @@ pub(crate) fn discover_generated_bindings(module_root: &Path) -> Vec<GeneratedBi
     }
 
     by_class_name.into_values().collect()
+}
+
+/// Walk databinding dirs (or all of `build/` when none are known) for generated
+/// `*Binding.java` files.
+///
+/// Keeps the newest mtime per class name across build variants. Ignores files
+/// with the wrong package or that cannot be read.
+pub(crate) fn discover_generated_bindings(
+    module_root: &Path,
+    databinding_dirs: Option<&[PathBuf]>,
+) -> Vec<GeneratedBindingEntry> {
+    if let Some(dirs) = databinding_dirs.filter(|dirs| !dirs.is_empty()) {
+        return discover_generated_bindings_in_dirs(dirs);
+    }
+
+    let discovered_dirs = discover_databinding_dirs(module_root);
+    if !discovered_dirs.is_empty() {
+        return discover_generated_bindings_in_dirs(&discovered_dirs);
+    }
+
+    discover_generated_bindings_in_build_tree(module_root)
 }
 
 // ─── Import trigger ───────────────────────────────────────────────────────────
@@ -430,7 +514,7 @@ pub(crate) fn spawn_binding_discovery_worker(
             let in_progress = Arc::clone(&in_progress);
             let rerun_requested = Arc::clone(&rerun_requested);
             tokio::task::spawn_blocking(move || {
-                indexer.index_generated_bindings(&module_for_blocking);
+                indexer.index_generated_bindings(&module_for_blocking, None);
             })
             .await
             .ok();
@@ -477,7 +561,11 @@ impl super::Indexer {
         }
     }
 
-    pub(crate) fn index_generated_bindings(&self, module_root: &Path) {
+    pub(crate) fn index_generated_bindings(
+        &self,
+        module_root: &Path,
+        databinding_dirs: Option<&[PathBuf]>,
+    ) {
         if let Ok(handle) = self.databinding_watcher.read() {
             handle.watch_module(module_root);
         }
@@ -494,7 +582,7 @@ impl super::Indexer {
             self.remove_generated_binding_class_entries_for_module(module_root);
         }
 
-        let discovered = discover_generated_bindings(module_root);
+        let discovered = discover_generated_bindings(module_root, databinding_dirs);
         let entries: HashMap<String, GeneratedBindingEntry> = discovered
             .into_iter()
             .map(|entry| (entry.class_name.clone(), entry))

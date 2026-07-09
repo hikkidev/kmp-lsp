@@ -43,6 +43,25 @@ fn write_binding_java(path: &Path, content: &str) {
 }
 
 #[test]
+fn discover_generated_bindings_uses_databinding_dirs_when_provided() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let databinding_dir =
+        module_root.join("build/generated/data_binding/base_builder_log/out/databinding");
+    let binding_path = databinding_dir.join("com/example/app/databinding/FooBarBinding.java");
+    let noise_path = module_root.join("build/tmp/noise/FooBarBinding.java");
+    fs::create_dir_all(binding_path.parent().unwrap()).expect("mkdir binding");
+    fs::create_dir_all(noise_path.parent().unwrap()).expect("mkdir noise");
+    write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
+    write_binding_java(&noise_path, WRONG_PACKAGE_BINDING_JAVA);
+
+    let discovered = discover_generated_bindings(&module_root, Some(&[databinding_dir.clone()]));
+    assert_eq!(discovered.len(), 1);
+    assert!(discovered[0].file_uri.contains("data_binding"));
+    assert!(!discovered[0].file_uri.contains("build/tmp/"));
+}
+
+#[test]
 fn discover_generated_bindings_finds_nested_agp_paths() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("app");
@@ -51,7 +70,7 @@ fn discover_generated_bindings_finds_nested_agp_paths() {
     );
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
-    let discovered = discover_generated_bindings(&module_root);
+    let discovered = discover_generated_bindings(&module_root, None);
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0].class_name, "FooBarBinding");
     assert!(discovered[0].file_uri.contains("FooBarBinding.java"));
@@ -65,7 +84,7 @@ fn discover_generated_bindings_rejects_wrong_package() {
         module_root.join("build/generated/source/debug/databinding/FooBarBinding.java");
     write_binding_java(&binding_path, WRONG_PACKAGE_BINDING_JAVA);
 
-    let discovered = discover_generated_bindings(&module_root);
+    let discovered = discover_generated_bindings(&module_root, None);
     assert!(discovered.is_empty());
 }
 
@@ -83,7 +102,7 @@ fn discover_generated_bindings_prefers_newer_mtime() {
     thread::sleep(Duration::from_millis(1100));
     write_binding_java(&release_path, SAMPLE_BINDING_JAVA);
 
-    let discovered = discover_generated_bindings(&module_root);
+    let discovered = discover_generated_bindings(&module_root, None);
     assert_eq!(discovered.len(), 1);
     assert!(discovered[0].file_uri.contains("release"));
     assert!(
@@ -194,7 +213,7 @@ class MainActivity {
     let indexer = Indexer::new();
     let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
     indexer.index_content(&kotlin_uri, kotlin_source);
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     let qualified_key = "com.example.app.databinding.FooBarBinding";
     assert!(
@@ -218,7 +237,7 @@ fn is_generated_binding_uri_distinguishes_generated_from_handwritten() {
     );
 
     let indexer = Indexer::new();
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     let generated_uri = Url::from_file_path(&generated_path)
         .expect("generated uri")
@@ -240,7 +259,7 @@ fn generated_binding_by_class_index_supports_import_lookup() {
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
     let indexer = Indexer::new();
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     let locations = indexer.generated_binding_locations_for_class("FooBarBinding");
     assert_eq!(locations.len(), 1);
@@ -270,7 +289,7 @@ fn workspace_files_importing_binding_class_lists_importers_only() {
     fs::write(&non_importer_path, noise_source).expect("write noise");
 
     let indexer = Indexer::new();
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
     let importer_uri = Url::from_file_path(&importer_path).expect("importer uri");
     let noise_uri = Url::from_file_path(&non_importer_path).expect("noise uri");
     indexer.index_content(&importer_uri, importer_source);
@@ -350,7 +369,7 @@ fn restore_generated_bindings_from_cache_registers_watcher_module() {
     warm_indexer.set_databinding_watcher_handle(crate::indexer::DatabindingWatcherHandle::new(
         Arc::clone(&watcher_state),
     ));
-    warm_indexer.index_generated_bindings(&module_root);
+    warm_indexer.index_generated_bindings(&module_root, None);
 
     with_xdg_cache(temp.path(), || {
         save_cache(
@@ -425,7 +444,7 @@ fn generated_bindings_cache_roundtrip() {
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
     let indexer = Indexer::new();
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     let cache_base = temp.path().join("cache");
     with_xdg_cache(&cache_base, || {
@@ -497,14 +516,14 @@ fn watcher_touch_reindexes_generated_binding_fixture() {
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
     let indexer = Indexer::new();
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
     let qualified_key = "com.example.app.databinding.FooBarBinding";
     assert!(indexer.qualified.contains_key(qualified_key));
 
     let updated_source = format!("{SAMPLE_BINDING_JAVA}\n// touched\n");
     thread::sleep(Duration::from_millis(1100));
     fs::write(&binding_path, updated_source).expect("rewrite binding");
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     assert!(indexer.qualified.contains_key(qualified_key));
     let binding_uri = Url::from_file_path(&binding_path)
@@ -534,8 +553,8 @@ fn reindex_removes_index_entries_for_deleted_binding_files() {
     write_binding_java(&other_binding_path, &other_binding_java);
 
     let indexer = Indexer::new();
-    indexer.index_generated_bindings(&app_module_root);
-    indexer.index_generated_bindings(&other_module_root);
+    indexer.index_generated_bindings(&app_module_root, None);
+    indexer.index_generated_bindings(&other_module_root, None);
 
     let app_qualified_key = "com.example.app.databinding.FooBarBinding";
     let other_qualified_key = "com.example.other.databinding.FooBarBinding";
@@ -549,7 +568,7 @@ fn reindex_removes_index_entries_for_deleted_binding_files() {
 
     // Simulate a clean build of `app`: the generated file disappears from disk.
     fs::remove_file(&app_binding_path).expect("delete app binding");
-    indexer.index_generated_bindings(&app_module_root);
+    indexer.index_generated_bindings(&app_module_root, None);
 
     assert!(
         !indexer.qualified.contains_key(app_qualified_key),

@@ -142,7 +142,7 @@ class MainActivity {
         }
         indexer.index_layout_content(&header_layout_uri, VIEW_HEADER_LAYOUT);
         if binding_java.is_some() {
-            indexer.index_generated_bindings(&module_root);
+            indexer.index_generated_bindings(&module_root, None);
         }
         indexer.index_content(&kotlin_uri, kotlin_source);
 

@@ -198,7 +198,7 @@ class MainActivity {
         indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
         indexer.index_layout_content(&land_layout_uri, FOO_BAR_LAYOUT_LAND);
         indexer.index_layout_content(&header_layout_uri, VIEW_HEADER_LAYOUT);
-        indexer.index_generated_bindings(&module_root);
+        indexer.index_generated_bindings(&module_root, None);
         indexer.index_content(&kotlin_uri, kotlin_source);
         indexer.set_live_lines(&kotlin_uri, kotlin_source);
         indexer.store_live_tree(&kotlin_uri, kotlin_source);
@@ -422,7 +422,9 @@ public final class FooBarBinding {
         .join("build/generated/databinding/com/example/other/databinding/FooBarBinding.java");
     fs::create_dir_all(other_binding_path.parent().unwrap()).expect("mkdir other binding");
     fs::write(&other_binding_path, other_binding_java).expect("write other binding");
-    fixture.indexer.index_generated_bindings(&other_module);
+    fixture
+        .indexer
+        .index_generated_bindings(&other_module, None);
 
     // App-module file importing the app-module binding: field type comes from
     // the app module's generated Java (TextView, not Button).
@@ -969,7 +971,7 @@ fun runBlock(binding: FooBarBinding) {
     let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
     let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
     indexer.index_layout_content(&layout_uri, FOO_BAR_LAYOUT);
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
     indexer.index_content(&kotlin_uri, kotlin_source);
     indexer.set_live_lines(&kotlin_uri, kotlin_source);
     indexer.store_live_tree(&kotlin_uri, kotlin_source);
@@ -1533,7 +1535,7 @@ class ProfileScreen {
         let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
 
         // Deliberately skip index_layout_content — only bindings + Kotlin.
-        indexer.index_generated_bindings(&module_root);
+        indexer.index_generated_bindings(&module_root, None);
         indexer.index_content(&kotlin_uri, kotlin_source);
         indexer.set_live_lines(&kotlin_uri, kotlin_source);
         indexer.store_live_tree(&kotlin_uri, kotlin_source);
@@ -1615,7 +1617,7 @@ public final class FooBarBinding {
     let indexer = Indexer::new();
     let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
     indexer.index_layout_content(&layout_uri, FOO_BAR_LAYOUT);
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
 
     let binding_java_uri = Url::from_file_path(&binding_java_path).expect("binding uri");
     let field_locations = indexer.find_definition_qualified("orphanField", None, &binding_java_uri);
@@ -1647,7 +1649,7 @@ fn remap_keeps_generated_java_when_no_layouts_exist() {
     fs::write(&binding_java_path, AVATAR_BINDING_JAVA).expect("write binding java");
 
     let indexer = Indexer::new();
-    indexer.index_generated_bindings(&module_root);
+    indexer.index_generated_bindings(&module_root, None);
     let binding_java_uri = Url::from_file_path(&binding_java_path).expect("binding uri");
     let binding_locations =
         indexer.find_definition_qualified("ProfileBinding", None, &binding_java_uri);
@@ -1864,7 +1866,7 @@ class Delegate {
         indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
         indexer.index_layout_content(&header_layout_uri, VIEW_HEADER_LAYOUT);
         indexer.index_layout_content(&profile_layout_uri, AVATAR_LAYOUT);
-        indexer.index_generated_bindings(&module_root);
+        indexer.index_generated_bindings(&module_root, None);
         indexer.index_content(&kotlin_uri, kotlin_source);
         indexer.set_live_lines(&kotlin_uri, kotlin_source);
         indexer.store_live_tree(&kotlin_uri, kotlin_source);
@@ -2063,7 +2065,7 @@ class Delegate {
 
         indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
         indexer.index_layout_content(&profile_layout_uri, AVATAR_LAYOUT);
-        indexer.index_generated_bindings(&module_root);
+        indexer.index_generated_bindings(&module_root, None);
         indexer.index_content(&wrong_holder_uri, wrong_holder_source);
         indexer.index_content(&kotlin_uri, kotlin_source);
         indexer.set_live_lines(&kotlin_uri, kotlin_source);
@@ -2260,7 +2262,7 @@ class FooFragment : ViewBindingAdapter<FooBarBinding>() {
         let kotlin_uri = Url::from_file_path(&kotlin_path).expect("fragment uri");
 
         indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
-        indexer.index_generated_bindings(&module_root);
+        indexer.index_generated_bindings(&module_root, None);
         indexer.index_content(&base_uri, base_source);
         indexer.index_content(&kotlin_uri, kotlin_source);
         indexer.set_live_lines(&kotlin_uri, kotlin_source);
