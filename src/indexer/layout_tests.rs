@@ -280,3 +280,40 @@ fn insert_layout_secondary_index_dedups_reindex() {
         .expect("secondary index entry");
     assert_eq!(uris.len(), 1);
 }
+
+#[test]
+fn ensure_module_layouts_indexed_retries_until_layouts_exist() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    fs::create_dir_all(module_root.join("src/main/kotlin")).expect("mkdir kotlin");
+
+    let indexer = Indexer::new();
+    assert_eq!(
+        indexer.ensure_module_layouts_indexed(&module_root),
+        0,
+        "no layout dirs yet"
+    );
+    assert!(
+        !indexer.layouts_indexed_modules.contains(&module_root),
+        "must not mark module done when walk found zero layout files"
+    );
+
+    let layout_path = module_root.join("src/main/res/layout/foo_bar.xml");
+    fs::create_dir_all(layout_path.parent().unwrap()).expect("mkdir layout");
+    fs::write(&layout_path, SAMPLE_LAYOUT).expect("write layout");
+
+    assert_eq!(
+        indexer.ensure_module_layouts_indexed(&module_root),
+        1,
+        "layout file appeared — on-demand path must index it"
+    );
+    assert!(
+        indexer.layouts_indexed_modules.contains(&module_root),
+        "module marked done once layout files exist on disk"
+    );
+    assert_eq!(
+        indexer.ensure_module_layouts_indexed(&module_root),
+        0,
+        "second call is a no-op"
+    );
+}

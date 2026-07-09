@@ -463,11 +463,14 @@ impl crate::indexer::Indexer {
         if self.layouts_indexed_modules.contains(module_root) {
             return 0;
         }
-        self.layouts_indexed_modules
-            .insert(module_root.to_path_buf());
+
+        let layout_paths = module_layout_paths(module_root);
+        if layout_paths.is_empty() {
+            return 0;
+        }
 
         let mut newly_indexed = 0_usize;
-        for path in module_layout_paths(module_root) {
+        for path in layout_paths {
             let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(&path) else {
                 continue;
             };
@@ -481,6 +484,8 @@ impl crate::indexer::Indexer {
             self.index_layout_content(&uri, &content);
             newly_indexed += 1;
         }
+        self.layouts_indexed_modules
+            .insert(module_root.to_path_buf());
         if newly_indexed > 0 {
             log::debug!(
                 "viewbinding: on-demand indexed {newly_indexed} layout(s) under {}",
