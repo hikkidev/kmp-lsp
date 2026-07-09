@@ -340,7 +340,7 @@ implementation plan.
 `initialized`, but the workspace scan kicked off during `initialize` already
 runs binding discovery against the earlier **noop** handle, whose registrations
 are dropped. To close that gap, `set_databinding_watcher_handle`
-(`src/indexer/binding_discovery.rs`) re-registers every already-discovered
+(`src/viewbinding/discovery.rs`) re-registers every already-discovered
 module root against the incoming handle, so modules discovered before the
 watcher was installed are still polled.
 
@@ -382,7 +382,7 @@ index is fully queryable and tested.
 
 - Add `tree-sitter-xml = "0.6.4"` to `Cargo.toml`.
 - XML node-kind constants in `src/queries.rs` (new XML section).
-- New module `src/indexer/layout.rs` (+ `layout_tests.rs`):
+- Module `src/viewbinding/layout.rs` (+ `layout_tests.rs`):
   - `struct LayoutFileData { module_root: PathBuf, layout_name: String, variant_qualifier: String, root_tag: TagLocation, view_binding_ignore: bool, view_ids: Vec<LayoutViewId>, includes: Vec<LayoutInclude> }`
   - `struct LayoutViewId { id: String, tag_name: String, id_attribute_range: Range }`
   - `struct LayoutInclude { id: Option<String>, included_layout_name: String, tag_range: Range }`
@@ -392,7 +392,8 @@ index is fully queryable and tested.
     the anchored `res*/layout*` segment check plus module-root derivation
     (`<X>/src/<sourceset>/res*/layout*/name.xml` → module root `<X>`,
     layout name, variant qualifier).
-- New field on `Indexer`: `layouts: DashMap<String, Arc<LayoutFileData>>`
+- New field on `Indexer`: `viewbinding: ViewBindingState` containing
+  `layouts: DashMap<String, Arc<LayoutFileData>>`
   (URI → data), plus read accessors and a
   `fn index_layout_content(&self, uri: &Url, content: &str)` /
   `fn remove_layout(&self, uri: &Url)` write pair on `Indexer`.
@@ -429,7 +430,7 @@ module-root derivation and the layout side index as a trigger).
 
 **Scope**
 
-- New module `src/indexer/binding_discovery.rs` (+ tests):
+- Module `src/viewbinding/discovery.rs` (+ tests):
   - `struct GeneratedBindingEntry { class_name: String, file_uri: String, modified_at: SystemTime }`
   - `fn discover_generated_bindings(module_root: &Path) -> Vec<GeneratedBindingEntry>` —
     walks `<module_root>/build/` for `*Binding.java`, verifies the `package`
@@ -492,8 +493,8 @@ is already proven infrastructure by the time diagnostics land.
 
 **Scope**
 
-- New module `src/backend/databinding_watcher.rs`
-  (+ `databinding_watcher_tests.rs`):
+- Module `src/viewbinding/watcher.rs`
+  (+ `watcher_tests.rs`):
   - `fn spawn_databinding_watcher(indexer: Arc<Indexer>) -> DatabindingWatcherHandle` —
     spawns a tokio task with a debounced poll loop (same shape as
     `spawn_git_head_watcher` in `src/backend/git_watcher.rs`, 2-second
@@ -538,7 +539,7 @@ for navigation, only for freshness).
 
 **Scope**
 
-- New module `src/features/viewbinding.rs` (+ tests):
+- Module `src/viewbinding/navigation.rs` (+ tests):
   - `fn remap_generated_binding_locations(index: &…, locations: Vec<Location>) -> Vec<Location>` —
     the single choke point. For each location inside a generated Binding.java
     (via `is_generated_binding_uri`): class → layout file start(s); id-backed
@@ -633,7 +634,7 @@ because it is pure polish on top of proven navigation.
 
 **Scope**
 
-- New module `src/features/viewbinding_diagnostics.rs` (+ tests):
+- Module `src/viewbinding/diagnostics.rs` (+ tests):
   - `fn viewbinding_import_diagnostics(index: &…, uri: &Url) -> Vec<Diagnostic>` —
     for each `*.databinding.*Binding` import in the file: if the paired
     layout exists but no generated class is discovered → Warning

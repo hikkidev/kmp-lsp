@@ -19,7 +19,6 @@ use crate::viewbinding::hover::{binding_field_access_hover, fallback_local_bindi
 use crate::viewbinding::{
     binding_field_hover_at_location, binding_field_hover_for_class, resolve_expected_binding_class,
 };
-use crate::StrExt;
 
 /// Compute a hover response for the cursor at `position` in `uri`.
 ///

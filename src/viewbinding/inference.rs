@@ -8,7 +8,6 @@ use crate::indexer::NodeExt;
 use crate::queries::{KIND_CALL_EXPR, KIND_NAV_EXPR, KIND_SIMPLE_IDENT};
 use crate::resolver::infer_lines::extract_type_with_generics;
 use crate::viewbinding::{binding_field_type, is_view_binding_class_name};
-use crate::LinesExt;
 use crate::StrExt;
 
 /// Infer a binding field type when `class_name` is a generated `*Binding` class.

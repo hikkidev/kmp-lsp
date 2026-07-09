@@ -10,9 +10,7 @@ use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
 use crate::types::{CallerContext, ImportEntry, SourceSet, Visibility};
-use crate::viewbinding::{
-    binding_layout_dot_completion_items, infer_bare_binding_field_type, is_view_binding_class_name,
-};
+use crate::viewbinding::binding_layout_dot_completion_items;
 use crate::LinesExt;
 use crate::StrExt;
 

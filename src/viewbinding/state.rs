@@ -86,8 +86,4 @@ impl ViewBindingState {
     pub(crate) fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<LayoutFileData>> {
         self.layouts.get(uri).map(|entry| Arc::clone(entry.value()))
     }
-
-    pub(crate) fn is_generated_binding_uri(&self, uri: &str) -> bool {
-        self.generated_binding_uris.contains(uri)
-    }
 }
