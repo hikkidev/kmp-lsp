@@ -13,7 +13,10 @@ impl Backend {
         let workspace = self.indexer.as_ref();
 
         let context_started = std::time::Instant::now();
-        let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
+        let mut parse_cache = crate::indexer::RequestParseCache::new();
+        let Some(ctx) =
+            CursorContext::build_with_cache(&self.indexer, uri, position, Some(&mut parse_cache))
+        else {
             return Ok(None);
         };
         let context_build_ms = context_started.elapsed().as_millis();
@@ -73,7 +76,10 @@ impl Backend {
             }
         }
 
-        let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
+        let mut parse_cache = crate::indexer::RequestParseCache::new();
+        let Some(ctx) =
+            CursorContext::build_with_cache(&self.indexer, uri, position, Some(&mut parse_cache))
+        else {
             return Ok(None);
         };
 
@@ -82,6 +88,7 @@ impl Backend {
             uri,
             position,
             &ctx,
+            Some(&mut parse_cache),
         ) {
             if !ctx.word.starts_with_uppercase()
                 && crate::features::viewbinding::binding_field_in_generated_java(
@@ -91,7 +98,6 @@ impl Backend {
                     uri,
                 )
             {
-                let mut parse_cache = crate::indexer::RequestParseCache::new();
                 let locations = crate::features::viewbinding::find_binding_field_references(
                     &self.indexer,
                     &mut parse_cache,

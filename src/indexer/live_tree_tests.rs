@@ -204,3 +204,25 @@ fn request_parse_cache_reuses_parsed_document() {
     );
     assert!(cache.get("file:///tmp/Foo.kt").is_some());
 }
+
+#[test]
+fn live_doc_or_parse_with_cache_reuses_request_cache() {
+    use super::RequestParseCache;
+    use crate::indexer::Indexer;
+    use tower_lsp::lsp_types::Url;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_path = temp.path().join("Sample.kt");
+    std::fs::write(&source_path, "class Sample").expect("write source");
+    let source_uri = Url::from_file_path(&source_path).expect("source uri");
+
+    let indexer = Indexer::new();
+    let mut parse_cache = RequestParseCache::new();
+    let first = indexer
+        .live_doc_or_parse_with_cache(&source_uri, &mut parse_cache)
+        .expect("first parse");
+    let second = indexer
+        .live_doc_or_parse_with_cache(&source_uri, &mut parse_cache)
+        .expect("cached parse");
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+}

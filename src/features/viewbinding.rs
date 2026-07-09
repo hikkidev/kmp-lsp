@@ -420,7 +420,7 @@ pub(crate) fn find_binding_field_definition(
     if ctx.word.starts_with_uppercase() {
         return None;
     }
-    let expected_class = resolve_expected_binding_class(index, uri, position, ctx)?;
+    let expected_class = resolve_expected_binding_class(index, uri, position, ctx, None)?;
     let path = uri.to_file_path().ok()?;
     let module_root = module_root_for_source_file(&path)?;
     let layout_name = layout_name_for_binding_class(&expected_class)?;
@@ -590,6 +590,7 @@ pub(crate) fn resolve_expected_binding_class(
     uri: &Url,
     position: Position,
     ctx: &CursorContext,
+    parse_cache: Option<&mut RequestParseCache>,
 ) -> Option<String> {
     if index.is_generated_binding_uri(uri.as_str()) {
         if !ctx.word.starts_with_uppercase() {
@@ -634,7 +635,7 @@ pub(crate) fn resolve_expected_binding_class(
         return binding_class_from_receiver_type(&receiver_type);
     }
 
-    binding_class_for_bare_field_at(index, uri, position, &ctx.word)
+    binding_class_for_bare_field_at(index, uri, position, &ctx.word, parse_cache)
 }
 
 fn binding_class_for_bare_field_at(
@@ -642,8 +643,9 @@ fn binding_class_for_bare_field_at(
     uri: &Url,
     position: Position,
     field_name: &str,
+    mut parse_cache: Option<&mut RequestParseCache>,
 ) -> Option<String> {
-    let (tree, bytes) = live_or_disk_tree(index, None, uri)?;
+    let (tree, bytes) = live_or_disk_tree(index, parse_cache.as_deref_mut(), uri)?;
     let line_text = index
         .mem_lines_for(uri.as_str())?
         .get(position.line as usize)?
@@ -660,7 +662,14 @@ fn binding_class_for_bare_field_at(
     if identifier_node.kind() != KIND_SIMPLE_IDENT {
         return None;
     }
-    binding_class_for_bare_field_access(index, &identifier_node, field_name, &bytes, uri)
+    binding_class_for_bare_field_access(
+        index,
+        &identifier_node,
+        field_name,
+        &bytes,
+        uri,
+        parse_cache,
+    )
 }
 
 fn binding_class_from_file_uri(index: &Indexer, uri: &Url) -> Option<String> {
@@ -792,7 +801,14 @@ fn verify_binding_field_reference(
     ) {
         infer_receiver_for_navigation(index, &navigation_node, &bytes, &location.uri)
     } else {
-        implicit_receiver_type_for_bare_field(index, &tree, &bytes, location, field_name)
+        implicit_receiver_type_for_bare_field(
+            index,
+            parse_cache,
+            &tree,
+            &bytes,
+            location,
+            field_name,
+        )
     };
     let Some(receiver_type) = receiver_type else {
         return false;
@@ -802,6 +818,7 @@ fn verify_binding_field_reference(
 
 fn implicit_receiver_type_for_bare_field(
     index: &Indexer,
+    parse_cache: &mut RequestParseCache,
     tree: &Tree,
     bytes: &[u8],
     location: &Location,
@@ -832,11 +849,12 @@ fn implicit_receiver_type_for_bare_field(
     }
     // A local val/var/param named `field_name` shadows the binding member, so a
     // bare usage here is not a binding-field reference.
-    if index.name_shadowed_by_local_declaration(
+    if index.name_shadowed_by_local_declaration_with_cache(
         &location.uri,
         location.range.start.line as usize,
         location.range.start.character as usize,
         field_name,
+        Some(parse_cache),
     ) {
         return None;
     }
@@ -1186,11 +1204,18 @@ pub(crate) fn binding_class_for_bare_field_access(
     field_name: &str,
     bytes: &[u8],
     uri: &Url,
+    parse_cache: Option<&mut RequestParseCache>,
 ) -> Option<String> {
     let start = identifier_node.start_position();
     let line_start_offsets = line_starts(bytes);
     let utf16_column = ts_byte_col_to_utf16(bytes, &line_start_offsets, start.row, start.column);
-    if index.name_shadowed_by_local_declaration(uri, start.row, utf16_column, field_name) {
+    if index.name_shadowed_by_local_declaration_with_cache(
+        uri,
+        start.row,
+        utf16_column,
+        field_name,
+        parse_cache,
+    ) {
         return None;
     }
     let lines = index.mem_lines_for(uri.as_str())?;

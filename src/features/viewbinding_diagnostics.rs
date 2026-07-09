@@ -209,7 +209,7 @@ fn check_stale_bare_binding_field(
         return None;
     }
     let binding_class =
-        binding_class_for_bare_field_access(index, identifier_node, &field_name, bytes, uri)?;
+        binding_class_for_bare_field_access(index, identifier_node, &field_name, bytes, uri, None)?;
     stale_binding_field_diagnostic(
         index,
         uri,

@@ -28,7 +28,10 @@ impl Backend {
             }
         }
 
-        let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
+        let mut parse_cache = crate::indexer::RequestParseCache::new();
+        let Some(ctx) =
+            CursorContext::build_with_cache(&self.indexer, uri, position, Some(&mut parse_cache))
+        else {
             return Ok(None);
         };
 
@@ -61,7 +64,10 @@ impl Backend {
             }
         }
 
-        let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
+        let mut parse_cache = crate::indexer::RequestParseCache::new();
+        let Some(ctx) =
+            CursorContext::build_with_cache(&self.indexer, uri, position, Some(&mut parse_cache))
+        else {
             return Ok(None);
         };
 

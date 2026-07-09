@@ -55,8 +55,9 @@ fn binding_field_access_hover<W: WorkspaceRead>(
     if ctx.word.starts_with_uppercase() {
         return None;
     }
-    let expected_class =
-        crate::features::viewbinding::resolve_expected_binding_class(indexer, uri, position, ctx)?;
+    let expected_class = crate::features::viewbinding::resolve_expected_binding_class(
+        indexer, uri, position, ctx, None,
+    )?;
     let markdown = crate::features::viewbinding::binding_field_hover_for_class(
         indexer,
         uri,
@@ -123,7 +124,7 @@ fn contextual_receiver_hover<W: WorkspaceRead>(
         binding_field_hover_at_location(workspace, &location, &ctx.word)
             .or_else(|| {
                 workspace.as_indexer().and_then(|indexer| {
-                    resolve_expected_binding_class(indexer, uri, position, ctx).and_then(
+                    resolve_expected_binding_class(indexer, uri, position, ctx, None).and_then(
                         |class_name| {
                             binding_field_hover_for_class(indexer, uri, &class_name, &ctx.word)
                         },

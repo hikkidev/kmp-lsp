@@ -11,7 +11,7 @@
 
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::indexer::{find_this_context_in_lines, Indexer, ThisContext};
+use crate::indexer::{find_this_context_in_lines, Indexer, RequestParseCache, ThisContext};
 use crate::resolver::{infer_receiver_type, infer_receiver_type_at, ReceiverKind, ReceiverType};
 use crate::types::CursorPos;
 
@@ -40,7 +40,12 @@ impl CursorContext {
     ///
     /// Returns `None` only when there is no identifier under the cursor
     /// (e.g. cursor is in whitespace or on a non-identifier token).
-    pub(crate) fn build(indexer: &Indexer, uri: &Url, position: Position) -> Option<Self> {
+    pub(crate) fn build_with_cache(
+        indexer: &Indexer,
+        uri: &Url,
+        position: Position,
+        parse_cache: Option<&mut RequestParseCache>,
+    ) -> Option<Self> {
         let (word, qualifier) = indexer.word_and_qualifier_at(uri, position)?;
 
         let line = position.line as usize;
@@ -74,7 +79,7 @@ impl CursorContext {
                 .next()
                 .is_some_and(|character| character.is_lowercase())
         {
-            implicit_receiver_type_for_bare_member(indexer, uri, line, col, &word)
+            implicit_receiver_type_for_bare_member(indexer, uri, line, col, &word, parse_cache)
         } else {
             None
         };
@@ -139,8 +144,9 @@ fn implicit_receiver_type_for_bare_member(
     line: usize,
     col: usize,
     word: &str,
+    parse_cache: Option<&mut RequestParseCache>,
 ) -> Option<ReceiverType> {
-    if indexer.name_shadowed_by_local_declaration(uri, line, col, word) {
+    if indexer.name_shadowed_by_local_declaration_with_cache(uri, line, col, word, parse_cache) {
         return None;
     }
     let lines = indexer.mem_lines_for(uri.as_str())?;

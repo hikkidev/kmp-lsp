@@ -402,7 +402,7 @@ impl Indexer {
         var_name: &str,
         position: Position,
     ) -> Option<String> {
-        self.variable_type_at_from_cst(uri, var_name, position)
+        self.variable_type_at_from_cst(uri, var_name, position, None)
     }
 
     fn variable_type_at_from_cst(
@@ -410,8 +410,9 @@ impl Indexer {
         uri: &Url,
         var_name: &str,
         position: Position,
+        parse_cache: Option<&mut super::RequestParseCache>,
     ) -> Option<String> {
-        let doc = self.live_doc_or_parse(uri)?;
+        let doc = self.live_doc_for_scope_query(uri, parse_cache)?;
         let line_text = self
             .lines_for(uri)
             .and_then(|lines| lines.get(position.line as usize).cloned())
@@ -467,7 +468,18 @@ impl Indexer {
         utf16_column: usize,
         name: &str,
     ) -> bool {
-        let Some(doc) = self.live_doc_or_parse(uri) else {
+        self.name_shadowed_by_local_declaration_with_cache(uri, line, utf16_column, name, None)
+    }
+
+    pub(crate) fn name_shadowed_by_local_declaration_with_cache(
+        &self,
+        uri: &Url,
+        line: usize,
+        utf16_column: usize,
+        name: &str,
+        parse_cache: Option<&mut super::RequestParseCache>,
+    ) -> bool {
+        let Some(doc) = self.live_doc_for_scope_query(uri, parse_cache) else {
             return false;
         };
         let line_text = self
@@ -504,12 +516,18 @@ impl Indexer {
     /// its parent sealed class so we can filter out unrelated `Loading` classes
     /// in other sealed hierarchies.
     pub(crate) fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
+        self.enclosing_class_at_impl(uri, row, None)
+    }
+
+    fn enclosing_class_at_impl(
+        &self,
+        uri: &Url,
+        row: u32,
+        parse_cache: Option<&mut super::RequestParseCache>,
+    ) -> Option<String> {
         let row = row as usize;
 
-        // ── CST path ─────────────────────────────────────────────────────────
-        // `live_doc_or_parse` parses on-demand if the live tree isn't cached
-        // yet (e.g. when findReferences arrives before did_open is processed).
-        if let Some(doc) = self.live_doc_or_parse(uri) {
+        if let Some(doc) = self.live_doc_for_scope_query(uri, parse_cache) {
             // Use the first non-whitespace byte on the row as the probe column.
             let probe_col = self
                 .live_lines

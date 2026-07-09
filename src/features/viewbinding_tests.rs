@@ -475,9 +475,14 @@ async fn binding_field_references_find_qualified_usages() {
     let fixture = ViewBindingFixture::build();
     let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
     let context = ViewBindingFixture::cursor_context("title", Some("binding"));
-    let expected =
-        resolve_expected_binding_class(&fixture.indexer, &fixture.kotlin_uri, position, &context)
-            .expect("expected binding class");
+    let expected = resolve_expected_binding_class(
+        &fixture.indexer,
+        &fixture.kotlin_uri,
+        position,
+        &context,
+        None,
+    )
+    .expect("expected binding class");
     assert_eq!(expected, "FooBarBinding");
 
     let references = binding_field_references_for_test(
@@ -981,7 +986,8 @@ fun runBlock(binding: FooBarBinding) {
         let context = if let Some(qualifier) = qualifier {
             ViewBindingFixture::cursor_context("title", Some(qualifier))
         } else {
-            CursorContext::build(&indexer, &kotlin_uri, position).expect("cursor context")
+            CursorContext::build_with_cache(&indexer, &kotlin_uri, position, None)
+                .expect("cursor context")
         };
         let response = find_definition(&context, &*indexer, &kotlin_uri, position)
             .await
@@ -1206,7 +1212,8 @@ fun misleadingWith(competitor: NotABinding) {
             "title",
         );
         let context =
-            CursorContext::build(&fixture.indexer, &scope_function_uri, position).expect("context");
+            CursorContext::build_with_cache(&fixture.indexer, &scope_function_uri, position, None)
+                .expect("context");
         let response = find_definition(&context, &*fixture.indexer, &scope_function_uri, position)
             .await
             .expect("definition for bare scope access");
@@ -1289,10 +1296,16 @@ async fn chained_include_field_references_from_nested_position() {
         "title",
     );
     let context =
-        CursorContext::build(&fixture.indexer, &fixture.kotlin_uri, position).expect("context");
-    let expected_class =
-        resolve_expected_binding_class(&fixture.indexer, &fixture.kotlin_uri, position, &context)
-            .expect("expected ViewHeaderBinding for chained include field");
+        CursorContext::build_with_cache(&fixture.indexer, &fixture.kotlin_uri, position, None)
+            .expect("context");
+    let expected_class = resolve_expected_binding_class(
+        &fixture.indexer,
+        &fixture.kotlin_uri,
+        position,
+        &context,
+        None,
+    )
+    .expect("expected ViewHeaderBinding for chained include field");
     assert_eq!(expected_class, "ViewHeaderBinding");
 
     let references = binding_field_references_for_test(
@@ -1412,8 +1425,8 @@ fun shadowed(binding: FooBarBinding) {
 
     let position =
         ViewBindingFixture::position_on_word_in_line(shadow_source, "println(title)", "title");
-    let context =
-        CursorContext::build(&fixture.indexer, &shadow_uri, position).expect("cursor context");
+    let context = CursorContext::build_with_cache(&fixture.indexer, &shadow_uri, position, None)
+        .expect("cursor context");
 
     assert!(
         context.qualifier.as_deref() != Some("this"),
@@ -1421,7 +1434,8 @@ fun shadowed(binding: FooBarBinding) {
         context.qualifier
     );
     assert!(
-        resolve_expected_binding_class(&fixture.indexer, &shadow_uri, position, &context).is_none(),
+        resolve_expected_binding_class(&fixture.indexer, &shadow_uri, position, &context, None)
+            .is_none(),
         "a local `val title` must not resolve to a binding class"
     );
 
@@ -1885,13 +1899,15 @@ class Delegate {
         let context = if let Some(qualifier_name) = qualifier {
             ViewBindingFixture::cursor_context(word, Some(qualifier_name))
         } else {
-            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context")
+            CursorContext::build_with_cache(&self.indexer, &self.kotlin_uri, position, None)
+                .expect("context")
         };
         let expected_class = resolve_expected_binding_class(
             &self.indexer,
             &self.kotlin_uri,
             position,
             &context,
+            None,
         )
         .unwrap_or_else(|| {
             panic!(
@@ -1909,7 +1925,8 @@ class Delegate {
         let position =
             ViewBindingFixture::position_on_word_in_line(&self.kotlin_source, line_needle, word);
         let context =
-            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context");
+            CursorContext::build_with_cache(&self.indexer, &self.kotlin_uri, position, None)
+                .expect("context");
         let response = find_definition(&context, &*self.indexer, &self.kotlin_uri, position)
             .await
             .expect("definition for {line_needle}");
@@ -1974,10 +1991,16 @@ fn resolve_expected_binding_class_other_method_uses_profile_binding() {
         "avatar",
     );
     let context =
-        CursorContext::build(&fixture.indexer, &fixture.kotlin_uri, position).expect("context");
-    let expected_class =
-        resolve_expected_binding_class(&fixture.indexer, &fixture.kotlin_uri, position, &context)
-            .expect("expected ProfileBinding for other()");
+        CursorContext::build_with_cache(&fixture.indexer, &fixture.kotlin_uri, position, None)
+            .expect("context");
+    let expected_class = resolve_expected_binding_class(
+        &fixture.indexer,
+        &fixture.kotlin_uri,
+        position,
+        &context,
+        None,
+    )
+    .expect("expected ProfileBinding for other()");
     assert_eq!(expected_class, "ProfileBinding");
 }
 
@@ -2085,13 +2108,15 @@ class Delegate {
         let context = if let Some(qualifier_name) = qualifier {
             ViewBindingFixture::cursor_context(word, Some(qualifier_name))
         } else {
-            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context")
+            CursorContext::build_with_cache(&self.indexer, &self.kotlin_uri, position, None)
+                .expect("context")
         };
         let expected_class = resolve_expected_binding_class(
             &self.indexer,
             &self.kotlin_uri,
             position,
             &context,
+            None,
         )
         .unwrap_or_else(|| {
             panic!(
@@ -2109,7 +2134,8 @@ class Delegate {
         let position =
             ViewBindingFixture::position_on_word_in_line(&self.kotlin_source, line_needle, word);
         let context =
-            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context");
+            CursorContext::build_with_cache(&self.indexer, &self.kotlin_uri, position, None)
+                .expect("context");
         let response =
             find_binding_field_definition(&self.indexer, &self.kotlin_uri, position, &context)
                 .expect("definition for {line_needle}");
@@ -2282,13 +2308,15 @@ class FooFragment : ViewBindingAdapter<FooBarBinding>() {
         let context = if let Some(qualifier_name) = qualifier {
             ViewBindingFixture::cursor_context(word, Some(qualifier_name))
         } else {
-            CursorContext::build(&self.indexer, &self.kotlin_uri, position).expect("context")
+            CursorContext::build_with_cache(&self.indexer, &self.kotlin_uri, position, None)
+                .expect("context")
         };
         let expected_class = resolve_expected_binding_class(
             &self.indexer,
             &self.kotlin_uri,
             position,
             &context,
+            None,
         )
         .unwrap_or_else(|| {
             panic!(
