@@ -108,6 +108,40 @@ class MainActivity {
 }
 
 #[test]
+fn import_diagnostic_resolves_aliased_binding_import_by_full_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let layout_dir = module_root.join("src/main/res/layout");
+    fs::create_dir_all(&layout_dir).expect("mkdir layout");
+    let layout_path = layout_dir.join("foo_bar.xml");
+    fs::write(&layout_path, FOO_BAR_LAYOUT).expect("write layout");
+
+    let kotlin_path = module_root.join("src/main/kotlin/com/example/MainActivity.kt");
+    fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir kotlin");
+    let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding as ScreenBinding
+
+class MainActivity {
+    fun demo(screen: ScreenBinding) {
+        screen.title
+    }
+}
+"#;
+    fs::write(&kotlin_path, kotlin_source).expect("write kotlin");
+
+    let indexer = Arc::new(Indexer::new());
+    let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
+    let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
+    indexer.index_layout_content(&layout_uri, FOO_BAR_LAYOUT);
+    indexer.index_content(&kotlin_uri, kotlin_source);
+
+    let diags = viewbinding_import_diagnostics(&indexer, &kotlin_uri);
+    assert_eq!(diags.len(), 1);
+    assert!(diags[0].message.contains("ViewBinding class not generated"));
+}
+
+#[test]
 fn import_diagnostic_when_layout_exists_but_no_generated_class() {
     let fixture = DiagnosticsFixture::build(FOO_BAR_LAYOUT, false);
     let diags = viewbinding_import_diagnostics(&fixture.indexer, &fixture.kotlin_uri);

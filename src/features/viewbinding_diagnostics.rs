@@ -49,8 +49,10 @@ pub(crate) fn viewbinding_import_diagnostics(index: &Indexer, uri: &Url) -> Vec<
         if import.is_star || !import_triggers_binding_discovery(&import.full_path) {
             continue;
         }
-        let class_name = import.local_name.clone();
-        let Some(layout_name) = layout_name_for_binding_class(&class_name) else {
+        let Some(class_name) = import.full_path.rsplit('.').next() else {
+            continue;
+        };
+        let Some(layout_name) = layout_name_for_binding_class(class_name) else {
             continue;
         };
         if !index.layout_exists_for_binding(&module_root, &layout_name) {
@@ -59,13 +61,13 @@ pub(crate) fn viewbinding_import_diagnostics(index: &Indexer, uri: &Url) -> Vec<
 
         let message = if index.any_layout_variant_ignores_view_binding(&module_root, &layout_name) {
             "Layout opts out of ViewBinding (`tools:viewBindingIgnore`)".to_string()
-        } else if !index.generated_binding_discovered(&module_root, &class_name) {
+        } else if !index.generated_binding_discovered(&module_root, class_name) {
             "ViewBinding class not generated — build the project".to_string()
         } else {
             continue;
         };
 
-        if let Some(range) = import_line_range(&file_data.lines, &import.full_path) {
+        if let Some(range) = import_line_range(&file_data.lines, import) {
             diagnostics.push(Diagnostic {
                 range,
                 severity: Some(DiagnosticSeverity::WARNING),
@@ -78,10 +80,11 @@ pub(crate) fn viewbinding_import_diagnostics(index: &Indexer, uri: &Url) -> Vec<
     diagnostics
 }
 
-fn import_line_range(lines: &[String], import_path: &str) -> Option<Range> {
-    let needle = format!("import {import_path}");
+fn import_line_range(lines: &[String], import: &crate::types::ImportEntry) -> Option<Range> {
+    let full_path_needle = format!("import {}", import.full_path);
+    let alias_needle = format!("import {} as {}", import.full_path, import.local_name);
     for (line_index, line) in lines.iter().enumerate() {
-        if line.contains(&needle) {
+        if line.contains(&full_path_needle) || line.contains(&alias_needle) {
             let end_col = line
                 .chars()
                 .map(|character| character.len_utf16() as u32)
