@@ -12,6 +12,7 @@ use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Node, Parser};
 
 use crate::indexer::NodeExt;
+use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
     KIND_XML_ATTRIBUTE, KIND_XML_ATT_VALUE, KIND_XML_CONTENT, KIND_XML_DOCUMENT, KIND_XML_ELEMENT,
     KIND_XML_EMPTY_ELEM_TAG, KIND_XML_NAME, KIND_XML_STAG,
@@ -200,7 +201,7 @@ fn walk_element(
     let Some(tag_name) = tag_name_from(tag_node, bytes) else {
         return;
     };
-    let tag_range = tree_sitter_range_to_lsp(tag_node.range());
+    let tag_range = tree_sitter_range_to_lsp(tag_node.range(), bytes);
     let attributes = collect_attribute_map(tag_node, bytes);
 
     if is_root {
@@ -290,8 +291,8 @@ fn collect_attribute_map(tag_node: Node<'_>, bytes: &[u8]) -> HashMap<String, (S
             .map(|text| strip_xml_quotes(&text))
             .unwrap_or_default();
         let value_range = value_node
-            .map(|node| tree_sitter_range_to_lsp(node.range()))
-            .unwrap_or_else(|| tree_sitter_range_to_lsp(child.range()));
+            .map(|node| tree_sitter_range_to_lsp(node.range(), bytes))
+            .unwrap_or_else(|| tree_sitter_range_to_lsp(child.range(), bytes));
         map.insert(attribute_name, (value_text, value_range));
     }
     map
@@ -336,15 +337,26 @@ fn parse_layout_reference(value: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-fn tree_sitter_range_to_lsp(range: tree_sitter::Range) -> Range {
+fn tree_sitter_range_to_lsp(range: tree_sitter::Range, bytes: &[u8]) -> Range {
+    let line_start_offsets = line_starts(bytes);
     Range {
         start: Position {
             line: range.start_point.row as u32,
-            character: range.start_point.column as u32,
+            character: ts_byte_col_to_utf16(
+                bytes,
+                &line_start_offsets,
+                range.start_point.row,
+                range.start_point.column,
+            ) as u32,
         },
         end: Position {
             line: range.end_point.row as u32,
-            character: range.end_point.column as u32,
+            character: ts_byte_col_to_utf16(
+                bytes,
+                &line_start_offsets,
+                range.end_point.row,
+                range.end_point.column,
+            ) as u32,
         },
     }
 }

@@ -227,6 +227,62 @@ fun render(binding: FooBarBinding) {
 }
 
 #[test]
+fn stale_field_diagnostic_range_uses_utf16_with_multibyte_prefix() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let layout_path = module_root.join("src/main/res/layout/foo_bar.xml");
+    fs::create_dir_all(layout_path.parent().unwrap()).expect("mkdir layout");
+    fs::write(&layout_path, FOO_BAR_LAYOUT).expect("write layout");
+
+    let binding_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
+    fs::create_dir_all(binding_path.parent().unwrap()).expect("mkdir binding");
+    fs::write(&binding_path, FOO_BAR_BINDING_WITH_STALE).expect("write binding");
+
+    let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) {
+        println("标题"); binding.oldField
+    }
+}
+"#;
+    let kotlin_path = module_root.join("src/main/kotlin/com/example/MainActivity.kt");
+    fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir kotlin");
+    fs::write(&kotlin_path, kotlin_source).expect("write kotlin");
+
+    let indexer = Arc::new(Indexer::new());
+    let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
+    let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
+    indexer.index_layout_content(&layout_uri, FOO_BAR_LAYOUT);
+    indexer.index_generated_bindings(&module_root);
+    indexer.index_content(&kotlin_uri, kotlin_source);
+    indexer.set_live_lines(&kotlin_uri, kotlin_source);
+    indexer.store_live_tree(&kotlin_uri, kotlin_source);
+
+    let document = indexer.live_doc(&kotlin_uri).expect("live doc");
+    let diags = stale_binding_field_diagnostics(&indexer, &kotlin_uri, &document);
+    let stale = diags
+        .iter()
+        .find(|diag| diag.message.contains("oldField"))
+        .expect("stale oldField diagnostic");
+
+    let line_index = stale.range.start.line as usize;
+    let line = kotlin_source.lines().nth(line_index).expect("source line");
+    let field_start = line.find("oldField").expect("field on line");
+    let expected_utf16 = line[..field_start]
+        .chars()
+        .map(|character| character.len_utf16())
+        .sum::<usize>() as u32;
+    assert_eq!(
+        stale.range.start.character, expected_utf16,
+        "stale diagnostic range must use UTF-16 columns (line: {line})"
+    );
+}
+
+#[test]
 fn stale_field_diagnostic_skipped_when_id_present() {
     let fixture = DiagnosticsFixture::build(FOO_BAR_LAYOUT, true);
     let document = fixture

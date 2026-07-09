@@ -87,6 +87,37 @@ fn parse_layout_xml_malformed_lone_quote_does_not_panic() {
 }
 
 #[test]
+fn parse_layout_xml_id_range_uses_utf16_columns_with_multibyte_prefix() {
+    let content = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android">
+    <TextView android:label="标题" android:id="@+id/title" />
+</LinearLayout>
+"#;
+    let parsed = parse_layout_xml(content);
+    let title = parsed
+        .view_ids
+        .iter()
+        .find(|view_id| view_id.id == "title")
+        .expect("title id");
+
+    let line_index = title.id_attribute_range.start.line as usize;
+    let line = content.lines().nth(line_index).expect("layout line");
+    let value_start = line
+        .find("\"@+id/title\"")
+        .or_else(|| line.find("@+id/title"))
+        .expect("id value in line");
+    let expected_utf16 = line[..value_start]
+        .chars()
+        .map(|character| character.len_utf16())
+        .sum::<usize>() as u32;
+
+    assert_eq!(
+        title.id_attribute_range.start.character, expected_utf16,
+        "id attribute range must use UTF-16 columns (line: {line})"
+    );
+}
+
+#[test]
 fn layout_path_components_uses_last_src_not_parent_src_directory() {
     let path = PathBuf::from("home/user/src/myproject/app/src/main/res/layout/foo_bar.xml");
     let components = layout_path_components(&path).expect("layout under nested src dirs");

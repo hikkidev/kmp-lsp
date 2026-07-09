@@ -9,6 +9,7 @@ use crate::indexer::{
     import_triggers_binding_discovery, layout_name_for_binding_class, module_root_for_source_file,
     Indexer, NodeExt,
 };
+use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
     KIND_CALL_EXPR, KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_PARAMETER, KIND_SIMPLE_IDENT,
     KIND_VAR_DECL,
@@ -184,7 +185,7 @@ fn check_stale_binding_field(
         uri,
         &binding_class,
         &field_name,
-        node_to_range(field_node),
+        node_to_range(field_node, bytes),
     )
 }
 
@@ -211,7 +212,7 @@ fn check_stale_bare_binding_field(
         uri,
         &binding_class,
         &field_name,
-        node_to_range(*identifier_node),
+        node_to_range(*identifier_node, bytes),
     )
 }
 
@@ -311,17 +312,19 @@ fn module_has_binding_staleness_context(index: &Indexer, uri: &Url) -> bool {
     })
 }
 
-fn node_to_range(node: tree_sitter::Node) -> Range {
+fn node_to_range(node: tree_sitter::Node, bytes: &[u8]) -> Range {
     let start = node.start_position();
     let end = node.end_position();
+    let line_start_offsets = line_starts(bytes);
     Range {
         start: Position {
             line: start.row as u32,
-            character: start.column as u32,
+            character: ts_byte_col_to_utf16(bytes, &line_start_offsets, start.row, start.column)
+                as u32,
         },
         end: Position {
             line: end.row as u32,
-            character: end.column as u32,
+            character: ts_byte_col_to_utf16(bytes, &line_start_offsets, end.row, end.column) as u32,
         },
     }
 }
