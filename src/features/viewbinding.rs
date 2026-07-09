@@ -895,6 +895,7 @@ pub(crate) async fn find_binding_field_references(
 
     let verified: Vec<Location> = candidates
         .into_iter()
+        .map(|location| normalize_reference_location_to_utf16(index, &location, field_name))
         .filter(|location| !index.is_generated_binding_uri(location.uri.as_str()))
         .filter(|location| {
             verify_binding_field_reference(
@@ -962,51 +963,47 @@ fn implicit_receiver_type_for_bare_field(
         })
         .and_then(|lines| lines.get(location.range.start.line as usize).cloned())
         .unwrap_or_default();
-    for byte_column in
-        reference_byte_column_candidates(&line_text, location.range.start.character as usize)
-    {
-        let target_point = tree_sitter::Point {
-            row: location.range.start.line as usize,
-            column: byte_column,
-        };
-        let node = root.descendant_for_point_range(target_point, target_point)?;
-        if node.kind() != KIND_SIMPLE_IDENT {
-            continue;
-        }
-        if node.utf8_text_owned(bytes).as_deref() != Some(field_name) {
-            continue;
-        }
-        // A local val/var/param named `field_name` shadows the binding member, so a
-        // bare usage here is not a binding-field reference.
-        if index.name_shadowed_by_local_declaration(
-            &location.uri,
-            location.range.start.line as usize,
-            location.range.start.character as usize,
-            field_name,
-        ) {
-            return None;
-        }
-        let lines = index.mem_lines_for(location.uri.as_str()).or_else(|| {
-            index
-                .files
-                .get(location.uri.as_str())
-                .map(|file_data| file_data.lines.clone())
-        })?;
-        let this_context = find_this_context_in_lines(
-            lines.as_ref(),
-            CursorPos {
-                line: location.range.start.line as usize,
-                utf16_col: location.range.start.character as usize,
-            },
-            index,
-            &location.uri,
-        );
-        return match this_context {
-            ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
-            ThisContext::InsideReceiver | ThisContext::NotFound => None,
-        };
+    let byte_column = reference_byte_column(&line_text, location.range.start.character as usize);
+    let target_point = tree_sitter::Point {
+        row: location.range.start.line as usize,
+        column: byte_column,
+    };
+    let node = root.descendant_for_point_range(target_point, target_point)?;
+    if node.kind() != KIND_SIMPLE_IDENT {
+        return None;
     }
-    None
+    if node.utf8_text_owned(bytes).as_deref() != Some(field_name) {
+        return None;
+    }
+    // A local val/var/param named `field_name` shadows the binding member, so a
+    // bare usage here is not a binding-field reference.
+    if index.name_shadowed_by_local_declaration(
+        &location.uri,
+        location.range.start.line as usize,
+        location.range.start.character as usize,
+        field_name,
+    ) {
+        return None;
+    }
+    let lines = index.mem_lines_for(location.uri.as_str()).or_else(|| {
+        index
+            .files
+            .get(location.uri.as_str())
+            .map(|file_data| file_data.lines.clone())
+    })?;
+    let this_context = find_this_context_in_lines(
+        lines.as_ref(),
+        CursorPos {
+            line: location.range.start.line as usize,
+            utf16_col: location.range.start.character as usize,
+        },
+        index,
+        &location.uri,
+    );
+    match this_context {
+        ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
+        ThisContext::InsideReceiver | ThisContext::NotFound => None,
+    }
 }
 
 fn live_or_disk_tree(
@@ -1052,37 +1049,93 @@ fn navigation_expression_at_position<'tree>(
         })
         .and_then(|lines| lines.get(position.line as usize).cloned())
         .unwrap_or_default();
-    for byte_column in reference_byte_column_candidates(&line_text, position.character as usize) {
-        let target_point = tree_sitter::Point {
-            row: position.line as usize,
-            column: byte_column,
-        };
-        let Some(mut node) = root.descendant_for_point_range(target_point, target_point) else {
-            continue;
-        };
-        loop {
-            if node.kind() == KIND_NAV_EXPR
-                && navigation_member_name(&node, bytes).as_deref() == Some(field_name)
-            {
-                return Some(node);
-            }
-            node = node.parent()?;
+    let byte_column = reference_byte_column(&line_text, position.character as usize);
+    let target_point = tree_sitter::Point {
+        row: position.line as usize,
+        column: byte_column,
+    };
+    let mut node = root.descendant_for_point_range(target_point, target_point)?;
+    while let Some(parent) = node.parent() {
+        if parent.kind() == KIND_NAV_EXPR
+            && navigation_member_name(&parent, bytes).as_deref() == Some(field_name)
+        {
+            return Some(parent);
         }
+        node = parent;
     }
     None
 }
 
-/// Reference locations may carry UTF-16 columns (index scan) or byte columns (rg).
-fn reference_byte_column_candidates(line_text: &str, character: usize) -> Vec<usize> {
-    let utf16_byte = utf16_col_to_byte(line_text, character);
-    let mut candidates = vec![utf16_byte];
-    if character <= line_text.len()
-        && line_text.is_char_boundary(character)
-        && character != utf16_byte
-    {
-        candidates.push(character);
+#[cfg(test)]
+pub(crate) fn normalize_reference_location_to_utf16_for_test(
+    index: &Indexer,
+    location: &Location,
+    field_name: &str,
+) -> Location {
+    normalize_reference_location_to_utf16(index, location, field_name)
+}
+
+/// Ripgrep emits byte columns; the index scan emits UTF-16. Normalize to UTF-16 once
+/// at ingestion so downstream CST probes use a single coordinate system.
+fn normalize_reference_location_to_utf16(
+    index: &Indexer,
+    location: &Location,
+    field_name: &str,
+) -> Location {
+    let line_text = index
+        .mem_lines_for(location.uri.as_str())
+        .or_else(|| {
+            index
+                .files
+                .get(location.uri.as_str())
+                .map(|file_data| file_data.lines.clone())
+        })
+        .and_then(|lines| lines.get(location.range.start.line as usize).cloned())
+        .unwrap_or_default();
+    let character = location.range.start.character as usize;
+    let utf16_as_byte = utf16_col_to_byte(&line_text, character);
+    if reference_identifier_at_byte_column(&line_text, utf16_as_byte) == Some(field_name) {
+        return location.clone();
     }
-    candidates
+    if reference_identifier_at_byte_column(&line_text, character) == Some(field_name) {
+        let utf16_column = ts_byte_col_to_utf16(line_text.as_bytes(), &[0], 0, character) as u32;
+        return Location {
+            uri: location.uri.clone(),
+            range: Range {
+                start: Position {
+                    line: location.range.start.line,
+                    character: utf16_column,
+                },
+                end: Position {
+                    line: location.range.end.line,
+                    character: utf16_column.saturating_add(field_name.len() as u32),
+                },
+            },
+        };
+    }
+    location.clone()
+}
+
+fn reference_identifier_at_byte_column(line_text: &str, byte_column: usize) -> Option<&str> {
+    if byte_column > line_text.len() || !line_text.is_char_boundary(byte_column) {
+        return None;
+    }
+    let suffix = &line_text[byte_column..];
+    let end = suffix
+        .char_indices()
+        .find(|(_, character)| !character.is_alphanumeric() && *character != '_')
+        .map(|(index, _)| index)
+        .unwrap_or(suffix.len());
+    let identifier = &suffix[..end];
+    if identifier.is_empty() {
+        None
+    } else {
+        Some(identifier)
+    }
+}
+
+fn reference_byte_column(line_text: &str, utf16_column: usize) -> usize {
+    utf16_col_to_byte(line_text, utf16_column)
 }
 
 fn navigation_member_name(navigation_node: &Node<'_>, bytes: &[u8]) -> Option<String> {

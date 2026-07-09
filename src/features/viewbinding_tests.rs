@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Url};
+use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, Url};
 
 use crate::backend::cursor::CursorContext;
 use crate::features::definition::find_definition;
@@ -14,7 +14,8 @@ use crate::features::viewbinding::{
     binding_field_hover_for_class, binding_field_in_generated_java, binding_field_in_live_layout,
     find_binding_field_definition, find_binding_field_references, find_binding_implementation,
     find_layout_xml_definition, find_layout_xml_implementation, find_layout_xml_references,
-    format_binding_field_hover, java_field_type_from_detail, remap_generated_binding_definitions,
+    format_binding_field_hover, java_field_type_from_detail,
+    normalize_reference_location_to_utf16_for_test, remap_generated_binding_definitions,
     resolve_expected_binding_class, short_type_name,
 };
 use crate::indexer::{
@@ -1612,6 +1613,61 @@ fn remap_keeps_generated_java_when_no_layouts_exist() {
             .iter()
             .any(|location| location.uri.as_str().contains("ProfileBinding.java")),
         "expected at least one generated Java fallback, got: {remapped:?}"
+    );
+}
+
+#[test]
+fn reference_location_normalization_converts_rg_byte_columns() {
+    let fixture = ViewBindingFixture::build();
+    let line = fixture
+        .kotlin_source
+        .lines()
+        .find(|line| line.contains("binding.title"))
+        .expect("binding.title line");
+    let prefixed = line.replace("binding.title", "println(\"标题\"); binding.title");
+    let byte_column = prefixed.find("title").expect("title in line") as u32;
+    let utf16_column = prefixed[..byte_column as usize]
+        .chars()
+        .map(|character| character.len_utf16())
+        .sum::<usize>() as u32;
+    assert_ne!(
+        byte_column, utf16_column,
+        "fixture must use a multibyte prefix"
+    );
+
+    let kotlin_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/MultibyteRef.kt");
+    fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir multibyte");
+    let source = format!("{}\n", fixture.kotlin_source.replace(line, &prefixed));
+    fs::write(&kotlin_path, &source).expect("write multibyte");
+    let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
+    fixture.indexer.index_content(&kotlin_uri, &source);
+
+    let rg_location = Location {
+        uri: kotlin_uri.clone(),
+        range: Range {
+            start: Position {
+                line: source
+                    .lines()
+                    .position(|l| l.contains("binding.title"))
+                    .unwrap() as u32,
+                character: byte_column,
+            },
+            end: Position {
+                line: source
+                    .lines()
+                    .position(|l| l.contains("binding.title"))
+                    .unwrap() as u32,
+                character: byte_column + 5,
+            },
+        },
+    };
+    let normalized =
+        normalize_reference_location_to_utf16_for_test(&fixture.indexer, &rg_location, "title");
+    assert_eq!(
+        normalized.range.start.character, utf16_column,
+        "rg byte columns must be normalized to UTF-16 at ingestion"
     );
 }
 
