@@ -6,11 +6,8 @@
 use tower_lsp::lsp_types::{Position, Url};
 use tree_sitter::Node;
 
-pub(crate) use crate::indexer::is_view_binding_class_name;
 use crate::indexer::live_tree::{utf16_col_to_byte, RequestParseCache};
-use crate::indexer::{
-    binding_field_type, find_this_context_in_lines, Indexer, NodeExt, ThisContext,
-};
+use crate::indexer::{find_this_context_in_lines, Indexer, NodeExt, ThisContext};
 use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{KIND_NAV_EXPR, KIND_SIMPLE_IDENT, KIND_THIS_EXPR};
 use crate::resolver::{
@@ -18,6 +15,8 @@ use crate::resolver::{
     ReceiverType,
 };
 use crate::types::CursorPos;
+use crate::viewbinding::binding_field_type;
+pub(crate) use crate::viewbinding::is_view_binding_class_name;
 
 /// True when `receiver_type` names a generated ViewBinding class.
 pub(crate) fn binding_class_from_receiver_type(receiver_type: &ReceiverType) -> Option<String> {

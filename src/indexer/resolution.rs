@@ -136,7 +136,7 @@ pub(crate) trait IndexRead {
         &self,
         _class_name: &str,
         _module_root: &std::path::Path,
-    ) -> Vec<Arc<crate::indexer::LayoutFileData>> {
+    ) -> Vec<Arc<crate::viewbinding::LayoutFileData>> {
         Vec::new()
     }
 
@@ -146,7 +146,7 @@ pub(crate) trait IndexRead {
     }
 
     /// Layout side-index entry for a layout XML URI.
-    fn layout_data_for_uri(&self, _uri: &str) -> Option<Arc<crate::indexer::LayoutFileData>> {
+    fn layout_data_for_uri(&self, _uri: &str) -> Option<Arc<crate::viewbinding::LayoutFileData>> {
         None
     }
 
@@ -155,7 +155,7 @@ pub(crate) trait IndexRead {
         &self,
         _class_name: &str,
         _module_root: &std::path::Path,
-    ) -> Vec<(String, Arc<crate::indexer::LayoutFileData>)> {
+    ) -> Vec<(String, Arc<crate::viewbinding::LayoutFileData>)> {
         Vec::new()
     }
 
@@ -802,7 +802,7 @@ impl IndexRead for super::Indexer {
         &self,
         class_name: &str,
         module_root: &std::path::Path,
-    ) -> Vec<Arc<crate::indexer::LayoutFileData>> {
+    ) -> Vec<Arc<crate::viewbinding::LayoutFileData>> {
         super::Indexer::layouts_for_binding_class(self, class_name, module_root)
     }
 
@@ -810,7 +810,7 @@ impl IndexRead for super::Indexer {
         super::Indexer::is_generated_binding_uri(self, uri)
     }
 
-    fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<crate::indexer::LayoutFileData>> {
+    fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<crate::viewbinding::LayoutFileData>> {
         super::Indexer::layout_data_for_uri(self, uri)
     }
 
@@ -818,7 +818,7 @@ impl IndexRead for super::Indexer {
         &self,
         class_name: &str,
         module_root: &std::path::Path,
-    ) -> Vec<(String, Arc<crate::indexer::LayoutFileData>)> {
+    ) -> Vec<(String, Arc<crate::viewbinding::LayoutFileData>)> {
         super::Indexer::layout_uris_for_binding_class(self, class_name, module_root)
     }
 
@@ -893,7 +893,7 @@ impl IndexRead for Arc<super::Indexer> {
         &self,
         class_name: &str,
         module_root: &std::path::Path,
-    ) -> Vec<Arc<crate::indexer::LayoutFileData>> {
+    ) -> Vec<Arc<crate::viewbinding::LayoutFileData>> {
         <super::Indexer as IndexRead>::layouts_for_binding_class(
             self.as_ref(),
             class_name,
@@ -905,7 +905,7 @@ impl IndexRead for Arc<super::Indexer> {
         <super::Indexer as IndexRead>::is_generated_binding_uri(self.as_ref(), uri)
     }
 
-    fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<crate::indexer::LayoutFileData>> {
+    fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<crate::viewbinding::LayoutFileData>> {
         <super::Indexer as IndexRead>::layout_data_for_uri(self.as_ref(), uri)
     }
 
@@ -913,7 +913,7 @@ impl IndexRead for Arc<super::Indexer> {
         &self,
         class_name: &str,
         module_root: &std::path::Path,
-    ) -> Vec<(String, Arc<crate::indexer::LayoutFileData>)> {
+    ) -> Vec<(String, Arc<crate::viewbinding::LayoutFileData>)> {
         <super::Indexer as IndexRead>::layout_uris_for_binding_class(
             self.as_ref(),
             class_name,

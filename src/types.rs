@@ -410,10 +410,10 @@ pub(crate) struct WorkspaceIndexResult {
     /// cache is a complete snapshot of the workspace.
     pub complete_scan: bool,
     /// Layout side-index entries from the on-disk cache at scan start.
-    pub cached_layouts: std::collections::HashMap<String, crate::indexer::LayoutCacheEntry>,
+    pub cached_layouts: std::collections::HashMap<String, crate::viewbinding::LayoutCacheEntry>,
     /// Generated binding side-index entries from the on-disk cache at scan start.
     pub cached_generated_bindings:
-        std::collections::HashMap<String, crate::indexer::ModuleBindingsCacheEntry>,
+        std::collections::HashMap<String, crate::viewbinding::ModuleBindingsCacheEntry>,
 }
 
 #[cfg(test)]

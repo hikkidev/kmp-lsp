@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tower_lsp::lsp_types::{Range, Url};
 use walkdir::WalkDir;
 
-use crate::indexer::layout::LayoutFileData;
+use super::layout::LayoutFileData;
 use crate::types::ImportEntry;
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -537,7 +537,7 @@ impl BindingDiscoveryHandle {
 
 /// Spawn the background binding-discovery worker. Returns a handle for hot-path callers.
 pub(crate) fn spawn_binding_discovery_worker(
-    indexer: Arc<super::Indexer>,
+    indexer: Arc<crate::indexer::Indexer>,
 ) -> BindingDiscoveryHandle {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let in_progress = Arc::new(DashSet::new());
@@ -577,9 +577,9 @@ pub(crate) fn spawn_binding_discovery_worker(
 
 // ─── Indexer integration ─────────────────────────────────────────────────────
 
-impl super::Indexer {
+impl crate::indexer::Indexer {
     pub(crate) fn set_binding_discovery_handle(&self, handle: BindingDiscoveryHandle) {
-        if let Ok(mut guard) = self.binding_discovery.write() {
+        if let Ok(mut guard) = self.viewbinding.binding_discovery.write() {
             *guard = handle;
         }
     }
@@ -593,7 +593,7 @@ impl super::Indexer {
         module_root: PathBuf,
         databinding_dirs: Option<Vec<PathBuf>>,
     ) {
-        if let Ok(handle) = self.binding_discovery.read() {
+        if let Ok(handle) = self.viewbinding.binding_discovery.read() {
             if handle.is_noop() {
                 self.index_generated_bindings(&module_root, databinding_dirs.as_deref());
                 return;
@@ -608,12 +608,12 @@ impl super::Indexer {
     /// Idempotent and additive — safe to call repeatedly.
     ///
     pub(crate) fn set_databinding_watcher_handle(&self, handle: DatabindingWatcherHandle) {
-        if let Ok(mut guard) = self.databinding_watcher.write() {
+        if let Ok(mut guard) = self.viewbinding.databinding_watcher.write() {
             *guard = handle;
         }
         // Re-register modules discovered before the real watcher was installed.
-        if let Ok(watcher) = self.databinding_watcher.read() {
-            for module in self.generated_bindings.iter() {
+        if let Ok(watcher) = self.viewbinding.databinding_watcher.read() {
+            for module in self.viewbinding.generated_bindings.iter() {
                 watcher.watch_module(module.key());
             }
         }
@@ -624,18 +624,21 @@ impl super::Indexer {
         module_root: &Path,
         databinding_dirs: Option<&[PathBuf]>,
     ) {
-        if let Ok(handle) = self.databinding_watcher.read() {
+        if let Ok(handle) = self.viewbinding.databinding_watcher.read() {
             handle.watch_module(module_root);
         }
 
         let previous_bindings = self
+            .viewbinding
             .generated_bindings
             .get(module_root)
             .map(|module| Arc::clone(module.value()));
 
         if let Some(previous_bindings) = &previous_bindings {
             for previous_entry in previous_bindings.entries.values() {
-                self.generated_binding_uris.remove(&previous_entry.file_uri);
+                self.viewbinding
+                    .generated_binding_uris
+                    .remove(&previous_entry.file_uri);
             }
             self.remove_generated_binding_class_entries_for_module(module_root);
         }
@@ -645,14 +648,16 @@ impl super::Indexer {
             .into_iter()
             .map(|entry| (entry.class_name.clone(), entry))
             .collect();
-        self.generated_bindings.insert(
+        self.viewbinding.generated_bindings.insert(
             module_root.to_path_buf(),
             Arc::new(ModuleBindings {
                 entries: entries.clone(),
             }),
         );
         for entry in entries.values() {
-            self.generated_binding_uris.insert(entry.file_uri.clone());
+            self.viewbinding
+                .generated_binding_uris
+                .insert(entry.file_uri.clone());
         }
 
         if let Some(previous_bindings) = previous_bindings {
@@ -691,7 +696,9 @@ impl super::Indexer {
             if still_discovered {
                 continue;
             }
-            self.generated_binding_uris.remove(&previous_entry.file_uri);
+            self.viewbinding
+                .generated_binding_uris
+                .remove(&previous_entry.file_uri);
             self.remove_stale_for_uri(&previous_entry.file_uri);
             self.files.remove(&previous_entry.file_uri);
         }
@@ -731,7 +738,10 @@ impl super::Indexer {
 
     /// Direct read from the layout side index.
     pub(crate) fn layout_data_for_uri(&self, uri: &str) -> Option<Arc<LayoutFileData>> {
-        self.layouts.get(uri).map(|entry| Arc::clone(entry.value()))
+        self.viewbinding
+            .layouts
+            .get(uri)
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     fn matching_layout_entries(
@@ -740,11 +750,12 @@ impl super::Indexer {
         layout_name: &str,
     ) -> Vec<(String, Arc<LayoutFileData>)> {
         let key = (module_root.to_path_buf(), layout_name.to_string());
-        if let Some(uris) = self.layouts_by_module_and_name.get(&key) {
+        if let Some(uris) = self.viewbinding.layouts_by_module_and_name.get(&key) {
             let mut entries: Vec<(String, Arc<LayoutFileData>)> = uris
                 .iter()
                 .filter_map(|uri| {
-                    self.layouts
+                    self.viewbinding
+                        .layouts
                         .get(uri)
                         .map(|entry| (uri.clone(), Arc::clone(entry.value())))
                 })
@@ -763,6 +774,7 @@ impl super::Indexer {
         }
 
         let mut entries: Vec<(String, Arc<LayoutFileData>)> = self
+            .viewbinding
             .layouts
             .iter()
             .filter_map(|entry| {
@@ -892,7 +904,8 @@ impl super::Indexer {
         module_root: &Path,
         class_name: &str,
     ) -> bool {
-        self.generated_bindings
+        self.viewbinding
+            .generated_bindings
             .get(module_root)
             .is_some_and(|module| module.entries.contains_key(class_name))
     }
@@ -919,7 +932,8 @@ impl super::Indexer {
         &self,
         class_name: &str,
     ) -> Vec<GeneratedBindingClassLocation> {
-        self.generated_binding_by_class
+        self.viewbinding
+            .generated_binding_by_class
             .get(class_name)
             .map(|entry| entry.clone())
             .unwrap_or_default()
@@ -1023,7 +1037,7 @@ impl super::Indexer {
     ) -> Option<String> {
         let path = source_uri.to_file_path().ok()?;
         let module_root = module_root_for_source_file(&path)?;
-        let module = self.generated_bindings.get(&module_root)?;
+        let module = self.viewbinding.generated_bindings.get(&module_root)?;
         let entry = module.entries.get(class_name)?;
         Some(entry.file_uri.clone())
     }
@@ -1041,7 +1055,8 @@ impl super::Indexer {
             file_uri: entry.file_uri.clone(),
             package,
         };
-        self.generated_binding_by_class
+        self.viewbinding
+            .generated_binding_by_class
             .entry(entry.class_name.clone())
             .or_default()
             .push(location);
@@ -1049,6 +1064,7 @@ impl super::Indexer {
 
     fn remove_generated_binding_class_entries_for_module(&self, module_root: &Path) {
         let class_names: Vec<String> = self
+            .viewbinding
             .generated_binding_by_class
             .iter()
             .filter_map(|entry| {
@@ -1060,11 +1076,17 @@ impl super::Indexer {
             })
             .collect();
         for class_name in class_names {
-            if let Some(mut locations) = self.generated_binding_by_class.get_mut(&class_name) {
+            if let Some(mut locations) = self
+                .viewbinding
+                .generated_binding_by_class
+                .get_mut(&class_name)
+            {
                 locations.retain(|location| location.module_root != *module_root);
                 if locations.is_empty() {
                     drop(locations);
-                    self.generated_binding_by_class.remove(&class_name);
+                    self.viewbinding
+                        .generated_binding_by_class
+                        .remove(&class_name);
                 }
             }
         }
@@ -1072,7 +1094,7 @@ impl super::Indexer {
 
     /// True when `uri` is a discovered generated binding file (side-index membership).
     pub(crate) fn is_generated_binding_uri(&self, uri: &str) -> bool {
-        self.generated_binding_uris.contains(uri)
+        self.viewbinding.generated_binding_uris.contains(uri)
     }
 
     pub(crate) fn restore_generated_bindings_from_cache(
@@ -1127,16 +1149,18 @@ impl super::Indexer {
             let entries_empty = fresh_entries.is_empty();
             if !entries_empty {
                 for entry in fresh_entries.values() {
-                    self.generated_binding_uris.insert(entry.file_uri.clone());
+                    self.viewbinding
+                        .generated_binding_uris
+                        .insert(entry.file_uri.clone());
                     self.insert_generated_binding_class_index(entry, &module_root);
                 }
-                self.generated_bindings.insert(
+                self.viewbinding.generated_bindings.insert(
                     module_root.clone(),
                     Arc::new(ModuleBindings {
                         entries: fresh_entries,
                     }),
                 );
-                if let Ok(watcher) = self.databinding_watcher.read() {
+                if let Ok(watcher) = self.viewbinding.databinding_watcher.read() {
                     watcher.watch_module(&module_root);
                 }
             }
@@ -1149,5 +1173,5 @@ impl super::Indexer {
 }
 
 #[cfg(test)]
-#[path = "binding_discovery_tests.rs"]
+#[path = "discovery_tests.rs"]
 mod tests;

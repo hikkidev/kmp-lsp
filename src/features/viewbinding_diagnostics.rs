@@ -5,14 +5,14 @@ use std::path::Path;
 use tower_lsp::lsp_types::*;
 
 use crate::indexer::live_tree::LiveDoc;
-use crate::indexer::{
-    import_triggers_binding_discovery, layout_name_for_binding_class, module_root_for_source_file,
-    Indexer, NodeExt,
-};
+use crate::indexer::{Indexer, NodeExt};
 use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
     KIND_CALL_EXPR, KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_PARAMETER, KIND_SIMPLE_IDENT,
     KIND_VAR_DECL,
+};
+use crate::viewbinding::{
+    import_triggers_binding_discovery, layout_name_for_binding_class, module_root_for_source_file,
 };
 use crate::Language;
 use crate::StrExt;
@@ -273,7 +273,7 @@ fn binding_field_exists(
     binding_class: &str,
     field_name: &str,
 ) -> bool {
-    let Some(module) = index.generated_bindings.get(module_root) else {
+    let Some(module) = index.viewbinding.generated_bindings.get(module_root) else {
         return false;
     };
     let Some(entry) = module.entries.get(binding_class) else {
@@ -301,6 +301,7 @@ fn module_has_binding_staleness_context(index: &Indexer, uri: &Url) -> bool {
         return false;
     };
     if index
+        .viewbinding
         .generated_bindings
         .get(&module_root)
         .is_some_and(|module| !module.entries.is_empty())

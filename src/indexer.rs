@@ -60,35 +60,13 @@ pub(crate) use self::infer::{
 mod cache;
 pub(crate) use self::cache::workspace_cache_path;
 pub(crate) use self::cache::xdg_cache_base;
+#[cfg(test)]
+pub(crate) use self::cache::{save_cache, try_load_cache, CACHE_VERSION};
 
 pub(crate) mod enrich;
 pub(crate) use self::enrich::EnrichmentHandle;
 
 mod discover;
-
-mod layout;
-pub(crate) use self::layout::{
-    element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
-    layout_path_components, spawn_layout_indexing_worker, view_id_at_layout_position,
-    LayoutCacheEntry, LayoutFileData, LayoutIndexingHandle,
-};
-
-mod binding_discovery;
-pub(crate) use self::binding_discovery::{
-    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    discover_databinding_dirs, import_triggers_binding_discovery,
-    is_generated_binding_watcher_path, is_view_binding_class_name, layout_name_for_binding_class,
-    module_root_for_generated_file, module_root_for_source_file, spawn_binding_discovery_worker,
-    view_id_matches_lookup, BindingDiscoveryHandle, DatabindingWatcherHandle,
-    DatabindingWatcherState, GeneratedBindingClassLocation, ModuleBindings,
-    ModuleBindingsCacheEntry,
-};
-
-mod binding_field_type;
-pub(crate) use self::binding_field_type::{
-    binding_field_type, binding_layout_completion_fields, infer_bare_binding_field_type,
-    java_field_type_from_detail, short_type_name,
-};
 
 mod scan;
 pub(crate) const MAX_FILES_UNLIMITED: usize = usize::MAX;
@@ -185,7 +163,7 @@ pub(crate) struct Indexer {
     /// Written only by [`crate::workspace::Actor`]; read-paths elsewhere observe it.
     pub(crate) workspace_root: WorkspaceRoot,
     /// URI string → xxHash of last indexed content (skip identical re-parses).
-    content_hashes: DashMap<String, u64>,
+    pub(crate) content_hashes: DashMap<String, u64>,
     /// Semaphore capping concurrent parse workers.
     parse_sem: Arc<tokio::sync::Semaphore>,
     /// Times tree-sitter actually ran (used in tests).
@@ -325,24 +303,8 @@ pub(crate) struct Indexer {
     /// one-package-per-jar inference. Empty string where the sidecar gave no package.
     /// NOT cleared by `reset_index_state()`.
     pub(crate) jar_symbol_packages: DashMap<String, Vec<String>>,
-    /// URI string → parsed Android layout XML metadata (ViewBinding side index).
-    pub(crate) layouts: DashMap<String, Arc<LayoutFileData>>,
-    /// Module root → discovered generated ViewBinding Java files.
-    pub(crate) generated_bindings: DashMap<PathBuf, Arc<ModuleBindings>>,
-    /// O(1) membership test for generated binding file URIs.
-    pub(crate) generated_binding_uris: DashSet<String>,
-    /// `class_name` → module locations for O(1) import/hover pairing.
-    pub(crate) generated_binding_by_class: DashMap<String, Vec<GeneratedBindingClassLocation>>,
-    /// Secondary index: (module_root, layout_name) → layout file URIs (default variant first).
-    pub(crate) layouts_by_module_and_name: DashMap<(PathBuf, String), Vec<String>>,
-    /// Modules whose layout XML has been enumerated by `ensure_module_layouts_indexed`.
-    pub(crate) layouts_indexed_modules: DashSet<PathBuf>,
-    /// Handle for enqueueing background generated-binding discovery.
-    pub(crate) binding_discovery: std::sync::RwLock<BindingDiscoveryHandle>,
-    /// Handle for registering module roots with the server-side databinding poll watcher.
-    pub(crate) databinding_watcher: std::sync::RwLock<DatabindingWatcherHandle>,
-    /// Handle for enqueueing background layout XML indexing.
-    pub(crate) layout_indexing: std::sync::RwLock<LayoutIndexingHandle>,
+    /// ViewBinding side index (layouts, generated bindings, background workers).
+    pub(crate) viewbinding: crate::viewbinding::ViewBindingState,
 }
 
 /// Cap on how many same-named definitions a receiver-less by-name inference lookup
@@ -618,15 +580,7 @@ impl Indexer {
             jar_uri_to_defs: DashMap::new(),
             jar_symbol_packages: DashMap::new(),
             extension_by_receiver: DashMap::new(),
-            layouts: DashMap::new(),
-            generated_bindings: DashMap::new(),
-            generated_binding_uris: DashSet::new(),
-            generated_binding_by_class: DashMap::new(),
-            layouts_by_module_and_name: DashMap::new(),
-            layouts_indexed_modules: DashSet::new(),
-            binding_discovery: std::sync::RwLock::new(BindingDiscoveryHandle::noop()),
-            databinding_watcher: std::sync::RwLock::new(DatabindingWatcherHandle::noop()),
-            layout_indexing: std::sync::RwLock::new(LayoutIndexingHandle::noop()),
+            viewbinding: crate::viewbinding::ViewBindingState::new(),
         }
     }
 
@@ -744,18 +698,7 @@ impl Indexer {
         self.completion_epoch.fetch_add(1, Ordering::Release);
         self.sig_cache.clear();
         self.sig_fast_cache.clear();
-        self.layouts.clear();
-        self.generated_bindings.clear();
-        self.generated_binding_uris.clear();
-        self.generated_binding_by_class.clear();
-        self.layouts_by_module_and_name.clear();
-        self.layouts_indexed_modules.clear();
-        if let Ok(handle) = self.binding_discovery.read() {
-            handle.clear();
-        }
-        if let Ok(handle) = self.layout_indexing.read() {
-            handle.clear();
-        }
+        self.viewbinding.reset();
         // Clear enrichment dedup so symbols are re-attempted after reindex.
         if let Ok(handle) = self.enrichment.read() {
             handle.clear();
@@ -987,15 +930,19 @@ impl Indexer {
     }
 
     pub(crate) fn remove_layout(&self, uri: &Url) {
-        if let Some((_, data)) = self.layouts.remove(uri.as_str()) {
-            self.remove_layout_secondary_index(&data, uri.as_str());
+        if let Some((_, data)) = self.viewbinding.layouts.remove(uri.as_str()) {
+            self.viewbinding
+                .remove_layout_secondary_index(&data, uri.as_str());
         }
     }
 
     /// Read accessor for the layout side index; used by ViewBinding navigation (PR 4+).
     #[allow(dead_code)]
-    pub(crate) fn layout_for_uri(&self, uri: &str) -> Option<Arc<LayoutFileData>> {
-        self.layouts.get(uri).map(|entry| Arc::clone(entry.value()))
+    pub(crate) fn layout_for_uri(
+        &self,
+        uri: &str,
+    ) -> Option<Arc<crate::viewbinding::LayoutFileData>> {
+        self.viewbinding.layout_data_for_uri(uri)
     }
 
     /// Bust the completion cache so the next request recomputes with the latest
@@ -1025,8 +972,8 @@ impl Indexer {
             return;
         }
         if let Ok(path) = uri.to_file_path() {
-            if crate::indexer::layout::is_layout_xml_path(&path) {
-                if self.layouts.contains_key(uri.as_str()) {
+            if crate::viewbinding::is_layout_xml_path(&path) {
+                if self.viewbinding.layouts.contains_key(uri.as_str()) {
                     return;
                 }
                 if let Ok(content) = std::fs::read_to_string(&path) {

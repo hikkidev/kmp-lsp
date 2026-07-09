@@ -5,11 +5,14 @@ use tower_lsp::lsp_types::{
     Url,
 };
 
-use crate::indexer::{binding_layout_completion_fields, is_view_binding_class_name, Indexer};
+use crate::indexer::Indexer;
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
 use crate::types::{CallerContext, ImportEntry, SourceSet, Visibility};
+use crate::viewbinding::{
+    binding_layout_completion_fields, infer_bare_binding_field_type, is_view_binding_class_name,
+};
 use crate::LinesExt;
 use crate::StrExt;
 

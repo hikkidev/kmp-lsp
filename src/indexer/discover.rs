@@ -13,8 +13,8 @@ use std::process::Command;
 use std::sync::Arc;
 
 use crate::indexer::cache::{workspace_cache_path, IndexCache};
-use crate::indexer::layout::is_layout_xml_path;
 use crate::rg::{IgnoreMatcher, SOURCE_EXTENSIONS};
+use crate::viewbinding::is_layout_xml_path;
 
 // ─── full scan ───────────────────────────────────────────────────────────────
 

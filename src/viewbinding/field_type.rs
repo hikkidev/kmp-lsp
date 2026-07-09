@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
-use super::{
+use super::discovery::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    find_this_context_in_lines, is_view_binding_class_name, layout_name_for_binding_class,
-    module_root_for_generated_file, module_root_for_source_file, view_id_matches_lookup, Indexer,
-    LayoutFileData, ThisContext,
+    is_view_binding_class_name, layout_name_for_binding_class, module_root_for_generated_file,
+    module_root_for_source_file, view_id_matches_lookup,
 };
+use super::layout::LayoutFileData;
+use crate::indexer::{find_this_context_in_lines, Indexer, ThisContext};
 use crate::types::CursorPos;
 
 /// A layout-derived binding field for dot-completion.
@@ -312,7 +313,7 @@ fn module_has_binding_layout(index: &Indexer, module_root: &Path, binding_class:
 fn module_root_if_unambiguous_layout(index: &Indexer, binding_class: &str) -> Option<PathBuf> {
     let layout_name = layout_name_for_binding_class(binding_class)?;
     let mut unique_match: Option<PathBuf> = None;
-    for entry in index.layouts.iter() {
+    for entry in index.viewbinding.layouts.iter() {
         let data = entry.value();
         if data.layout_name != layout_name {
             continue;
@@ -370,7 +371,7 @@ fn binding_file_uri_in_own_module(
 ) -> Option<String> {
     let path = source_uri.to_file_path().ok()?;
     let module_root = module_root_for_source_file(&path)?;
-    let module = index.generated_bindings.get(&module_root)?;
+    let module = index.viewbinding.generated_bindings.get(&module_root)?;
     let entry = module.entries.get(binding_class)?;
     Some(entry.file_uri.clone())
 }
@@ -385,5 +386,5 @@ fn binding_file_uri_if_unambiguous(index: &Indexer, binding_class: &str) -> Opti
 }
 
 #[cfg(test)]
-#[path = "binding_field_type_tests.rs"]
+#[path = "field_type_tests.rs"]
 mod tests;

@@ -8,7 +8,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::backend::databinding_watcher::spawn_databinding_watcher_with_interval;
-use crate::indexer::{DatabindingWatcherHandle, DatabindingWatcherState, Indexer};
+use crate::indexer::Indexer;
+use crate::viewbinding::{DatabindingWatcherHandle, DatabindingWatcherState};
 use crate::workspace::Event;
 
 const SAMPLE_BINDING_JAVA: &str = r#"package com.example.app.databinding;

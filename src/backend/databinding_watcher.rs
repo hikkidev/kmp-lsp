@@ -12,9 +12,10 @@ use futures::future::join_all;
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
 
-use crate::indexer::{
+use crate::indexer::Indexer;
+use crate::viewbinding::{
     discover_databinding_dirs, is_generated_binding_watcher_path, DatabindingWatcherHandle,
-    DatabindingWatcherState, Indexer,
+    DatabindingWatcherState,
 };
 use crate::workspace::Event;
 
@@ -109,11 +110,12 @@ fn snapshot_differs_from_index(
 ) -> bool {
     if current_snapshot.is_empty() {
         return indexer
+            .viewbinding
             .generated_bindings
             .get(module_root)
             .is_some_and(|module_bindings| !module_bindings.entries.is_empty());
     }
-    match indexer.generated_bindings.get(module_root) {
+    match indexer.viewbinding.generated_bindings.get(module_root) {
         Some(module_bindings) => {
             if module_bindings.entries.len() != current_snapshot.len() {
                 return true;

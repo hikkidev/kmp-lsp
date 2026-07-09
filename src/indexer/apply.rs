@@ -24,13 +24,13 @@ use tower_lsp::lsp_types::*;
 use super::{FileContributions, Indexer, StaleKeys};
 use crate::indexer::cache::{build_qualified_keys, FileCacheEntry};
 use crate::indexer::discover::{find_layout_files, find_source_files_unconstrained};
-use crate::indexer::LayoutCacheEntry;
 use crate::parser::parse_by_extension;
 use crate::path_util::to_forward_slash;
 use crate::resolver::symbols_from_uri_as_completions_pub;
 use crate::types::{
     ExtensionEntry, FileData, FileIndexResult, SourceSet, Visibility, WorkspaceIndexResult,
 };
+use crate::viewbinding::LayoutCacheEntry;
 use crate::StrExt;
 
 fn classify_source_set(uri: &str, source_paths: &[String]) -> SourceSet {
@@ -1048,7 +1048,7 @@ impl Indexer {
         if crate::backend::helpers::is_xml_uri(uri) {
             if uri
                 .to_file_path()
-                .is_ok_and(|path| crate::indexer::is_layout_xml_path(&path))
+                .is_ok_and(|path| crate::viewbinding::is_layout_xml_path(&path))
             {
                 self.index_layout_content(uri, content);
             }
@@ -1103,11 +1103,11 @@ impl Indexer {
             paths.len(),
             root.display()
         );
-        if paths.is_empty() && !self.generated_bindings.is_empty() {
+        if paths.is_empty() && !self.viewbinding.generated_bindings.is_empty() {
             log::warn!(
                 "viewbinding: bulk layout discovery found 0 files under {} but {} module(s) have generated bindings — layouts may be gitignored or outside fd scope",
                 root.display(),
-                self.generated_bindings.len()
+                self.viewbinding.generated_bindings.len()
             );
         }
         let mut indexed_count = 0_usize;
@@ -1130,9 +1130,11 @@ impl Indexer {
                         .unwrap_or(0);
                     let file_size = meta.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
                     if entry.mtime_secs == mtime && entry.file_size == file_size {
-                        self.layouts
+                        self.viewbinding
+                            .layouts
                             .insert(uri_string.clone(), Arc::clone(&entry.data));
-                        self.insert_layout_secondary_index(&uri_string, &entry.data);
+                        self.viewbinding
+                            .insert_layout_secondary_index(&uri_string, &entry.data);
                         cache_hit_count += 1;
                         continue;
                     }
@@ -1146,7 +1148,7 @@ impl Indexer {
         }
         log::info!(
             "viewbinding: bulk layout indexing complete parsed={indexed_count} cache_hits={cache_hit_count} side_index_size={}",
-            self.layouts.len()
+            self.viewbinding.layouts.len()
         );
     }
 

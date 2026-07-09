@@ -18,10 +18,9 @@ use crate::features::viewbinding::{
     normalize_reference_location_to_utf16_for_test, remap_generated_binding_definitions,
     resolve_expected_binding_class, short_type_name,
 };
-use crate::indexer::{
-    binding_field_name_to_id, binding_id_to_field_name, Indexer, RequestParseCache,
-};
+use crate::indexer::{Indexer, RequestParseCache};
 use crate::parser::nullable_at_line;
+use crate::viewbinding::{binding_field_name_to_id, binding_id_to_field_name};
 
 async fn binding_field_references_for_test(
     indexer: &Indexer,
@@ -1471,7 +1470,7 @@ fn xml_view_id_lookup_maps_utf16_column_to_bytes() {
         .layout_data_for_uri(layout_uri.as_str())
         .expect("layout side index");
     assert_eq!(
-        crate::indexer::view_id_at_layout_position(&layout_data, position),
+        crate::viewbinding::view_id_at_layout_position(&layout_data, position),
         Some("title".to_string()),
         "side-index ranges are UTF-16, so the cursor column must match without re-parsing"
     );

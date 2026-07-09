@@ -818,7 +818,7 @@ fn index_content_routes_layout_xml_to_side_index() {
         "layout XML must not enter the symbol index"
     );
     assert!(
-        indexer.layouts.contains_key(uri.as_str()),
+        indexer.viewbinding.layouts.contains_key(uri.as_str()),
         "layout XML must be indexed in the layout side index"
     );
 }

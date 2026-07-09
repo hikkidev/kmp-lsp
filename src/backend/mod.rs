@@ -57,9 +57,10 @@ impl Backend {
         let handle =
             crate::indexer::enrich::spawn_enrichment_worker(Arc::clone(&indexer), client.clone());
         indexer.set_enrichment_handle(handle);
-        let binding_handle = crate::indexer::spawn_binding_discovery_worker(Arc::clone(&indexer));
+        let binding_handle =
+            crate::viewbinding::spawn_binding_discovery_worker(Arc::clone(&indexer));
         indexer.set_binding_discovery_handle(binding_handle);
-        let layout_handle = crate::indexer::spawn_layout_indexing_worker(Arc::clone(&indexer));
+        let layout_handle = crate::viewbinding::spawn_layout_indexing_worker(Arc::clone(&indexer));
         indexer.set_layout_indexing_handle(layout_handle);
 
         Self {
@@ -148,7 +149,7 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        if let Ok(watcher) = self.indexer.databinding_watcher.read() {
+        if let Ok(watcher) = self.indexer.viewbinding.databinding_watcher.read() {
             watcher.cancel();
         }
         // Spawn cache write in background so the LSP shutdown response is sent
@@ -230,7 +231,7 @@ impl LanguageServer for Backend {
                 continue;
             };
 
-            if crate::indexer::is_layout_xml_path(&path) {
+            if crate::viewbinding::is_layout_xml_path(&path) {
                 if change.typ == FileChangeType::DELETED {
                     self.indexer.remove_layout(&change.uri);
                     continue;
@@ -253,9 +254,10 @@ impl LanguageServer for Backend {
                 continue;
             }
 
-            if crate::indexer::is_generated_binding_watcher_path(&path) {
+            if crate::viewbinding::is_generated_binding_watcher_path(&path) {
                 if change.typ == FileChangeType::DELETED {
-                    if let Some(module_root) = crate::indexer::module_root_for_generated_file(&path)
+                    if let Some(module_root) =
+                        crate::viewbinding::module_root_for_generated_file(&path)
                     {
                         let indexer = Arc::clone(&self.indexer);
                         tokio::task::spawn(async move {
@@ -268,7 +270,8 @@ impl LanguageServer for Backend {
                     }
                     continue;
                 }
-                if let Some(module_root) = crate::indexer::module_root_for_generated_file(&path) {
+                if let Some(module_root) = crate::viewbinding::module_root_for_generated_file(&path)
+                {
                     self.indexer
                         .request_generated_binding_discovery(module_root);
                 }

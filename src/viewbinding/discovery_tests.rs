@@ -6,18 +6,17 @@ use std::time::{Duration, SystemTime};
 
 use tower_lsp::lsp_types::Url;
 
-use crate::indexer::binding_discovery::{
+use crate::indexer::test_helpers::with_xdg_cache;
+use crate::indexer::{save_cache, try_load_cache, Indexer, CACHE_VERSION};
+use crate::viewbinding::discovery::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
     discover_generated_bindings, import_triggers_binding_discovery,
     is_generated_binding_watcher_path, layout_name_for_binding_class,
     module_root_for_generated_file, module_root_for_source_file,
 };
-use crate::indexer::cache::{save_cache, try_load_cache, CACHE_VERSION};
-use crate::indexer::layout::{
+use crate::viewbinding::layout::{
     build_layout_file_data, layout_path_components, parse_layout_xml, LayoutPathComponents,
 };
-use crate::indexer::test_helpers::with_xdg_cache;
-use crate::indexer::Indexer;
 
 const SAMPLE_BINDING_JAVA: &str = r#"package com.example.app.databinding;
 
@@ -348,7 +347,7 @@ fn layouts_for_binding_class_pairs_by_module_and_orders_default_first() {
     ] {
         let data = build_layout_file_data(&components, &parsed).expect("layout data");
         let uri = format!("file:///layout/{uri_suffix}");
-        indexer.layouts.insert(uri, Arc::new(data));
+        indexer.viewbinding.layouts.insert(uri, Arc::new(data));
     }
 
     let layouts = indexer.layouts_for_binding_class("FooBarBinding", &module_root);
@@ -377,9 +376,9 @@ fn restore_generated_bindings_from_cache_registers_watcher_module() {
         .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
     write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
 
-    let watcher_state = Arc::new(crate::indexer::DatabindingWatcherState::new());
+    let watcher_state = Arc::new(crate::viewbinding::DatabindingWatcherState::new());
     let warm_indexer = Indexer::new();
-    warm_indexer.set_databinding_watcher_handle(crate::indexer::DatabindingWatcherHandle::new(
+    warm_indexer.set_databinding_watcher_handle(crate::viewbinding::DatabindingWatcherHandle::new(
         Arc::clone(&watcher_state),
     ));
     warm_indexer.index_generated_bindings(&module_root, None);
@@ -390,8 +389,8 @@ fn restore_generated_bindings_from_cache_registers_watcher_module() {
             &warm_indexer.files,
             &warm_indexer.content_hashes,
             &warm_indexer.library_uris,
-            &warm_indexer.layouts,
-            &warm_indexer.generated_bindings,
+            &warm_indexer.viewbinding.layouts,
+            &warm_indexer.viewbinding.generated_bindings,
             true,
             true,
         );
@@ -399,7 +398,7 @@ fn restore_generated_bindings_from_cache_registers_watcher_module() {
         let loaded = try_load_cache(&root).expect("cache loaded");
         let restored_indexer = Indexer::new();
         restored_indexer.set_databinding_watcher_handle(
-            crate::indexer::DatabindingWatcherHandle::new(Arc::clone(&watcher_state)),
+            crate::viewbinding::DatabindingWatcherHandle::new(Arc::clone(&watcher_state)),
         );
         restored_indexer.restore_generated_bindings_from_cache(&loaded.generated_bindings);
 
@@ -466,8 +465,8 @@ fn generated_bindings_cache_roundtrip() {
             &indexer.files,
             &indexer.content_hashes,
             &indexer.library_uris,
-            &indexer.layouts,
-            &indexer.generated_bindings,
+            &indexer.viewbinding.layouts,
+            &indexer.viewbinding.generated_bindings,
             true,
             true,
         );
@@ -502,7 +501,7 @@ fn index_layout_content_triggers_binding_discovery() {
     runtime.block_on(async {
         let indexer = Arc::new(Indexer::new());
         indexer.set_binding_discovery_handle(
-            crate::indexer::binding_discovery::spawn_binding_discovery_worker(Arc::clone(&indexer)),
+            crate::viewbinding::discovery::spawn_binding_discovery_worker(Arc::clone(&indexer)),
         );
 
         let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");

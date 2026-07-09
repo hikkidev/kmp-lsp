@@ -23,18 +23,20 @@ use crate::features::references::{
 };
 use crate::features::traits::{DocumentAccess, SymbolIndex};
 use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte, RequestParseCache};
-use crate::indexer::{
-    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
-    layout_name_for_binding_class, layout_path_components, module_root_for_generated_file,
-    module_root_for_source_file, view_id_at_layout_position, IndexRead, Indexer,
-};
+use crate::indexer::{IndexRead, Indexer};
 use crate::inlay_hints::ts_byte_col_to_utf16;
 use crate::queries::KIND_SIMPLE_IDENT;
 use crate::resolver::{
     infer::infer_field_chain_type, infer_receiver_type, infer_receiver_type_at, ReceiverKind,
 };
 use crate::types::{FileData, SymbolEntry};
+use crate::viewbinding::{
+    binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
+    element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
+    java_field_type_from_detail, layout_name_for_binding_class, layout_path_components,
+    module_root_for_generated_file, module_root_for_source_file, short_type_name,
+    view_id_at_layout_position,
+};
 use crate::StrExt;
 
 const ANDROID_TAG_PREFIXES: &[&str] = &["android.widget.", "android.view.", "android.webkit."];
@@ -332,7 +334,7 @@ pub(crate) fn binding_field_in_generated_java(
     let Some(module_root) = module_root_for_source_file(&path) else {
         return false;
     };
-    let Some(module) = index.generated_bindings.get(&module_root) else {
+    let Some(module) = index.viewbinding.generated_bindings.get(&module_root) else {
         return false;
     };
     let Some(entry) = module.entries.get(expected_binding_class) else {
@@ -498,8 +500,6 @@ pub(crate) fn find_layout_xml_implementation(
     }
     None
 }
-
-pub(crate) use crate::indexer::{java_field_type_from_detail, short_type_name};
 
 /// Kotlin-style hover for a generated binding field: `val title: TextView` / `val title: TextView?`.
 pub(crate) fn format_binding_field_hover(

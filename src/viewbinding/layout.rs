@@ -523,26 +523,6 @@ fn module_layout_paths(module_root: &Path) -> Vec<PathBuf> {
 }
 
 impl crate::indexer::Indexer {
-    pub(crate) fn insert_layout_secondary_index(&self, uri: &str, data: &LayoutFileData) {
-        let key = (data.module_root.clone(), data.layout_name.clone());
-        let mut entry = self.layouts_by_module_and_name.entry(key).or_default();
-        let uri_string = uri.to_string();
-        if !entry.contains(&uri_string) {
-            entry.push(uri_string);
-        }
-    }
-
-    pub(crate) fn remove_layout_secondary_index(&self, data: &LayoutFileData, uri: &str) {
-        let key = (data.module_root.clone(), data.layout_name.clone());
-        if let Some(mut entry) = self.layouts_by_module_and_name.get_mut(&key) {
-            entry.retain(|existing| existing != uri);
-            if entry.is_empty() {
-                drop(entry);
-                self.layouts_by_module_and_name.remove(&key);
-            }
-        }
-    }
-
     /// Index any layout XML files under `module_root` that are not yet in the layout side index.
     ///
     /// Read-path callers enqueue background indexing and return 0. Tests and the layout
@@ -560,7 +540,11 @@ impl crate::indexer::Indexer {
         {
             return 0;
         }
-        if self.layouts_indexed_modules.contains(module_root) {
+        if self
+            .viewbinding
+            .layouts_indexed_modules
+            .contains(module_root)
+        {
             return 0;
         }
 
@@ -575,7 +559,7 @@ impl crate::indexer::Indexer {
                 continue;
             };
             let uri_string = uri.to_string();
-            if self.layouts.contains_key(&uri_string) {
+            if self.viewbinding.layouts.contains_key(&uri_string) {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&path) else {
@@ -584,7 +568,8 @@ impl crate::indexer::Indexer {
             self.index_layout_content(&uri, &content);
             newly_indexed += 1;
         }
-        self.layouts_indexed_modules
+        self.viewbinding
+            .layouts_indexed_modules
             .insert(module_root.to_path_buf());
         if newly_indexed > 0 {
             log::debug!(
@@ -596,13 +581,13 @@ impl crate::indexer::Indexer {
     }
 
     pub(crate) fn set_layout_indexing_handle(&self, handle: LayoutIndexingHandle) {
-        if let Ok(mut guard) = self.layout_indexing.write() {
+        if let Ok(mut guard) = self.viewbinding.layout_indexing.write() {
             *guard = handle;
         }
     }
 
     pub(crate) fn request_module_layout_indexing(&self, module_root: PathBuf) {
-        if let Ok(handle) = self.layout_indexing.read() {
+        if let Ok(handle) = self.viewbinding.layout_indexing.read() {
             if handle.is_noop() {
                 self.index_module_layouts_blocking(&module_root);
                 return;
@@ -625,8 +610,11 @@ impl crate::indexer::Indexer {
         };
         let uri_string = uri.to_string();
         let data = std::sync::Arc::new(data);
-        self.layouts.insert(uri_string.clone(), Arc::clone(&data));
-        self.insert_layout_secondary_index(&uri_string, &data);
+        self.viewbinding
+            .layouts
+            .insert(uri_string.clone(), Arc::clone(&data));
+        self.viewbinding
+            .insert_layout_secondary_index(&uri_string, &data);
         self.request_generated_binding_discovery(components.module_root);
     }
 }

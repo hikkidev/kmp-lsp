@@ -18,10 +18,10 @@ use tower_lsp::lsp_types::Url;
 
 use crate::types::{FileData, FileIndexResult, Visibility};
 
-use super::binding_discovery::{ModuleBindings, ModuleBindingsCacheEntry};
-use super::layout::LayoutFileData;
+use crate::viewbinding::discovery::{ModuleBindings, ModuleBindingsCacheEntry};
+use crate::viewbinding::layout::LayoutFileData;
 
-pub(crate) use super::layout::LayoutCacheEntry;
+pub(crate) use crate::viewbinding::LayoutCacheEntry;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -63,22 +63,22 @@ pub(crate) struct FileCacheEntry {
 
 /// Complete serialized index, written to `~/.cache/kmp-lsp/<root-hash>/index.bin`.
 #[derive(Serialize, Deserialize)]
-pub(super) struct IndexCache {
-    pub(super) version: u32,
+pub(crate) struct IndexCache {
+    pub(crate) version: u32,
     /// True when this cache was built from a complete (non-truncated) workspace scan.
     /// Only set to true when `total <= max` at index time.
     /// When false, the entries may be a partial subset of the workspace — warm-manifest
     /// mode is disabled to avoid hiding files that were never indexed.
     #[serde(default)]
-    pub(super) complete_scan: bool,
+    pub(crate) complete_scan: bool,
     /// Absolute path string → per-file cached data.
-    pub(super) entries: HashMap<String, FileCacheEntry>,
+    pub(crate) entries: HashMap<String, FileCacheEntry>,
     /// Absolute path string → cached layout side-index data.
     #[serde(default)]
-    pub(super) layouts: HashMap<String, LayoutCacheEntry>,
+    pub(crate) layouts: HashMap<String, LayoutCacheEntry>,
     /// Module root path string → cached generated binding side-index data.
     #[serde(default)]
-    pub(super) generated_bindings: HashMap<String, ModuleBindingsCacheEntry>,
+    pub(crate) generated_bindings: HashMap<String, ModuleBindingsCacheEntry>,
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ pub(super) fn write_status_file(content: &str) {
 // ─── Load ─────────────────────────────────────────────────────────────────────
 
 /// Load and validate the on-disk cache.  Returns `None` if absent / stale / corrupt.
-pub(super) fn try_load_cache(root: &Path) -> Option<IndexCache> {
+pub(crate) fn try_load_cache(root: &Path) -> Option<IndexCache> {
     let path = workspace_cache_path(root);
     let bytes = std::fs::read(&path).ok()?;
     let cache: IndexCache = match bincode::deserialize(&bytes) {
@@ -217,7 +217,7 @@ pub(crate) fn build_qualified_keys(
 /// to prevent an editor server (which may load only part of the workspace) from
 /// truncating a cache built by `--index-only`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn save_cache(
+pub(crate) fn save_cache(
     root: &Path,
     files: &DashMap<String, Arc<FileData>>,
     content_hashes: &DashMap<String, u64>,

@@ -5,7 +5,7 @@ use super::Backend;
 use crate::features::definition as def;
 use crate::features::implementation as imp;
 use crate::features::viewbinding;
-use crate::indexer::is_layout_xml_path;
+use crate::viewbinding::is_layout_xml_path;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 impl Backend {

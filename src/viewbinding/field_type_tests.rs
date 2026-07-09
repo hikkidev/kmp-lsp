@@ -6,9 +6,10 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 
 use super::binding_field_type;
-use crate::indexer::{binding_layout_completion_fields, infer_bare_binding_field_type, Indexer};
+use crate::indexer::Indexer;
 use crate::resolver::complete::complete_dot;
 use crate::resolver::infer::{find_field_type_in_class_from, infer_receiver_type_at};
+use crate::viewbinding::{binding_layout_completion_fields, infer_bare_binding_field_type};
 use tower_lsp::lsp_types::Position;
 
 const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>

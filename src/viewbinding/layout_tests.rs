@@ -9,9 +9,8 @@ use super::{
     is_layout_xml_path, layout_path_components, parse_layout_xml, view_id_at_layout_position,
     LayoutPathComponents,
 };
-use crate::indexer::cache::{save_cache, try_load_cache, CACHE_VERSION};
 use crate::indexer::test_helpers::with_xdg_cache;
-use crate::indexer::Indexer;
+use crate::indexer::{save_cache, try_load_cache, Indexer, CACHE_VERSION};
 
 const SAMPLE_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout
@@ -204,7 +203,10 @@ fn layout_cache_roundtrip() {
 
     let indexer = Indexer::new();
     let uri = Url::from_file_path(&layout_path).expect("layout uri");
-    indexer.layouts.insert(uri.to_string(), Arc::new(data));
+    indexer
+        .viewbinding
+        .layouts
+        .insert(uri.to_string(), Arc::new(data));
 
     with_xdg_cache(tmp.path(), || {
         save_cache(
@@ -212,8 +214,8 @@ fn layout_cache_roundtrip() {
             &indexer.files,
             &indexer.content_hashes,
             &indexer.library_uris,
-            &indexer.layouts,
-            &indexer.generated_bindings,
+            &indexer.viewbinding.layouts,
+            &indexer.viewbinding.generated_bindings,
             true,
             true,
         );
@@ -252,8 +254,8 @@ fn layout_cache_restore_populates_secondary_index() {
             &warm_indexer.files,
             &warm_indexer.content_hashes,
             &warm_indexer.library_uris,
-            &warm_indexer.layouts,
-            &warm_indexer.generated_bindings,
+            &warm_indexer.viewbinding.layouts,
+            &warm_indexer.viewbinding.generated_bindings,
             true,
             true,
         );
@@ -268,15 +270,19 @@ fn layout_cache_restore_populates_secondary_index() {
         let restored_indexer = Indexer::new();
         let uri_string = uri.to_string();
         restored_indexer
+            .viewbinding
             .layouts
             .insert(uri_string.clone(), Arc::clone(&cache_entry.data));
-        restored_indexer.insert_layout_secondary_index(&uri_string, &cache_entry.data);
+        restored_indexer
+            .viewbinding
+            .insert_layout_secondary_index(&uri_string, &cache_entry.data);
 
         let key = (
             cache_entry.data.module_root.clone(),
             cache_entry.data.layout_name.clone(),
         );
         let uris = restored_indexer
+            .viewbinding
             .layouts_by_module_and_name
             .get(&key)
             .expect("secondary index populated on warm restore");
@@ -302,11 +308,16 @@ fn insert_layout_secondary_index_dedups_reindex() {
     let data = build_layout_file_data(&components, &parsed).expect("layout data");
     let uri = "file:///app/src/main/res/layout/foo_bar.xml";
 
-    indexer.insert_layout_secondary_index(uri, &data);
-    indexer.insert_layout_secondary_index(uri, &data);
+    indexer
+        .viewbinding
+        .insert_layout_secondary_index(uri, &data);
+    indexer
+        .viewbinding
+        .insert_layout_secondary_index(uri, &data);
 
     let key = (PathBuf::from("app"), "foo_bar".to_string());
     let uris = indexer
+        .viewbinding
         .layouts_by_module_and_name
         .get(&key)
         .expect("secondary index entry");
@@ -326,7 +337,10 @@ fn ensure_module_layouts_indexed_retries_until_layouts_exist() {
         "no layout dirs yet"
     );
     assert!(
-        !indexer.layouts_indexed_modules.contains(&module_root),
+        !indexer
+            .viewbinding
+            .layouts_indexed_modules
+            .contains(&module_root),
         "must not mark module done when walk found zero layout files"
     );
 
@@ -340,7 +354,10 @@ fn ensure_module_layouts_indexed_retries_until_layouts_exist() {
         "layout file appeared — on-demand path must index it"
     );
     assert!(
-        indexer.layouts_indexed_modules.contains(&module_root),
+        indexer
+            .viewbinding
+            .layouts_indexed_modules
+            .contains(&module_root),
         "module marked done once layout files exist on disk"
     );
     assert_eq!(

@@ -7,8 +7,8 @@ use tree_sitter::Point;
 
 use super::{
     find_as_call_arg_type, find_it_element_type_in_lines, find_named_lambda_param_type_in_lines,
-    find_this_context_in_lines, is_view_binding_class_name, lambda_brace_pos_for_param,
-    line_has_lambda_param, Indexer, ThisContext,
+    find_this_context_in_lines, lambda_brace_pos_for_param, line_has_lambda_param, Indexer,
+    ThisContext,
 };
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
@@ -20,6 +20,7 @@ use crate::queries::{
     KIND_USER_TYPE, KIND_VAR_DECL, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
 };
 use crate::types::CursorPos;
+use crate::viewbinding::is_view_binding_class_name;
 use crate::StrExt;
 
 /// Lines to scan backward when resolving variable types and lambda receivers from scope.

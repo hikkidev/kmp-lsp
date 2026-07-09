@@ -1,9 +1,10 @@
 use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
-use crate::indexer::{
-    binding_field_type, infer_bare_binding_field_type, is_view_binding_class_name, Indexer,
-};
+use crate::indexer::Indexer;
 use crate::types::FileData;
+use crate::viewbinding::{
+    binding_field_type, infer_bare_binding_field_type, is_view_binding_class_name,
+};
 use crate::LinesExt;
 use crate::StrExt;
 

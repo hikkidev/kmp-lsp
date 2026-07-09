@@ -1093,8 +1093,8 @@ impl Indexer {
             &self.files,
             &self.content_hashes,
             &self.library_uris,
-            &self.layouts,
-            &self.generated_bindings,
+            &self.viewbinding.layouts,
+            &self.viewbinding.generated_bindings,
             complete_scan,
             allow_shrink,
         );
