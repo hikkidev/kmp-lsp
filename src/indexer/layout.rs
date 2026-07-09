@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Node, Parser};
@@ -88,7 +89,9 @@ pub(crate) fn layout_path_components(path: &Path) -> Option<LayoutPathComponents
     }
 
     let components: Vec<Component<'_>> = path.components().collect();
-    let source_index = components.iter().position(
+    // Use the last `src` segment so paths like `~/src/project/app/src/main/...` anchor
+    // at the module root (`app`), not the parent directory named `src`.
+    let source_index = components.iter().rposition(
         |component| matches!(component, Component::Normal(name) if name.to_str() == Some("src")),
     )?;
     if source_index == 0 {
@@ -300,10 +303,14 @@ fn attribute_is_true(attributes: &HashMap<String, (String, Range)>, name: &str) 
         .is_some_and(|(value, _)| value.eq_ignore_ascii_case("true"))
 }
 
-fn strip_xml_quotes(value: &str) -> String {
+/// Strip surrounding single or double quotes from an XML attribute value.
+///
+/// Malformed values (e.g. a lone `"`) return the trimmed input without panicking.
+pub(crate) fn strip_xml_quotes(value: &str) -> String {
     let trimmed = value.trim();
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
     {
         trimmed[1..trimmed.len() - 1].to_string()
     } else {
@@ -359,32 +366,106 @@ pub(crate) fn build_layout_file_data(
     })
 }
 
-/// Collect layout XML paths under `<module_root>/src/**/res*/layout*/`.
+/// Collect layout XML paths under `<module_root>/src/*/res*/layout*/` without
+/// walking unrelated source trees.
 fn module_layout_paths(module_root: &Path) -> Vec<PathBuf> {
     let source_root = module_root.join("src");
     if !source_root.is_dir() {
         return Vec::new();
     }
+
     let mut paths = Vec::new();
-    for entry in walkdir::WalkDir::new(&source_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        let path = entry.path();
-        if path.is_file() && is_layout_xml_path(path) {
-            paths.push(path.to_path_buf());
+    let Ok(source_sets) = std::fs::read_dir(&source_root) else {
+        return paths;
+    };
+    for source_set in source_sets.filter_map(Result::ok) {
+        let source_set_path = source_set.path();
+        if !source_set_path.is_dir() {
+            continue;
+        }
+        let Ok(resource_dirs) = std::fs::read_dir(&source_set_path) else {
+            continue;
+        };
+        for resource_dir in resource_dirs.filter_map(Result::ok) {
+            let resource_path = resource_dir.path();
+            if !resource_path.is_dir() {
+                continue;
+            }
+            let Some(resource_name) = resource_path.file_name().and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            if !resource_name.starts_with("res") {
+                continue;
+            }
+            let Ok(layout_dirs) = std::fs::read_dir(&resource_path) else {
+                continue;
+            };
+            for layout_dir in layout_dirs.filter_map(Result::ok) {
+                let layout_path = layout_dir.path();
+                if !layout_path.is_dir() {
+                    continue;
+                }
+                let Some(layout_dir_name) = layout_path.file_name().and_then(|name| name.to_str())
+                else {
+                    continue;
+                };
+                if layout_dir_name != "layout" && !layout_dir_name.starts_with("layout-") {
+                    continue;
+                }
+                let Ok(xml_files) = std::fs::read_dir(&layout_path) else {
+                    continue;
+                };
+                for file in xml_files.filter_map(Result::ok) {
+                    let path = file.path();
+                    if path.is_file() && is_layout_xml_path(&path) {
+                        paths.push(path);
+                    }
+                }
+            }
         }
     }
     paths
 }
 
 impl crate::indexer::Indexer {
+    pub(crate) fn insert_layout_secondary_index(&self, uri: &str, data: &LayoutFileData) {
+        let key = (data.module_root.clone(), data.layout_name.clone());
+        let mut entry = self.layouts_by_module_and_name.entry(key).or_default();
+        let uri_string = uri.to_string();
+        if !entry.contains(&uri_string) {
+            entry.push(uri_string);
+        }
+    }
+
+    pub(crate) fn remove_layout_secondary_index(&self, data: &LayoutFileData, uri: &str) {
+        let key = (data.module_root.clone(), data.layout_name.clone());
+        if let Some(mut entry) = self.layouts_by_module_and_name.get_mut(&key) {
+            entry.retain(|existing| existing != uri);
+            if entry.is_empty() {
+                drop(entry);
+                self.layouts_by_module_and_name.remove(&key);
+            }
+        }
+    }
+
     /// Index any layout XML files under `module_root` that are not yet in the layout side index.
     ///
     /// Returns how many files were newly indexed. Used on-demand when bulk workspace
     /// discovery missed layouts (gitignore/fd exclusions) but navigation needs them.
     pub(crate) fn ensure_module_layouts_indexed(&self, module_root: &Path) -> usize {
+        if self
+            .indexing_in_progress
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return 0;
+        }
+        if self.layouts_indexed_modules.contains(module_root) {
+            return 0;
+        }
+        self.layouts_indexed_modules
+            .insert(module_root.to_path_buf());
+
         let mut newly_indexed = 0_usize;
         for path in module_layout_paths(module_root) {
             let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(&path) else {
@@ -401,7 +482,7 @@ impl crate::indexer::Indexer {
             newly_indexed += 1;
         }
         if newly_indexed > 0 {
-            log::info!(
+            log::debug!(
                 "viewbinding: on-demand indexed {newly_indexed} layout(s) under {}",
                 module_root.display()
             );
@@ -421,8 +502,10 @@ impl crate::indexer::Indexer {
         let Some(data) = build_layout_file_data(&components, &parsed) else {
             return;
         };
-        self.layouts
-            .insert(uri.to_string(), std::sync::Arc::new(data));
+        let uri_string = uri.to_string();
+        let data = std::sync::Arc::new(data);
+        self.layouts.insert(uri_string.clone(), Arc::clone(&data));
+        self.insert_layout_secondary_index(&uri_string, &data);
         self.request_generated_binding_discovery(components.module_root);
     }
 }

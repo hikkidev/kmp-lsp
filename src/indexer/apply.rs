@@ -1130,7 +1130,9 @@ impl Indexer {
                         .unwrap_or(0);
                     let file_size = meta.as_ref().map(|metadata| metadata.len()).unwrap_or(0);
                     if entry.mtime_secs == mtime && entry.file_size == file_size {
-                        self.layouts.insert(uri_string, Arc::clone(&entry.data));
+                        self.layouts
+                            .insert(uri_string.clone(), Arc::clone(&entry.data));
+                        self.insert_layout_secondary_index(&uri_string, &entry.data);
                         cache_hit_count += 1;
                         continue;
                     }

@@ -42,7 +42,7 @@ pub(crate) struct ModuleBindingsCacheEntry {
 /// `<X>/build/.../FooBarBinding.java` → `<X>`.
 pub(crate) fn module_root_for_generated_file(path: &Path) -> Option<PathBuf> {
     let components: Vec<Component<'_>> = path.components().collect();
-    let build_index = components.iter().position(
+    let build_index = components.iter().rposition(
         |component| matches!(component, Component::Normal(name) if name.to_str() == Some("build")),
     )?;
     if build_index == 0 {
@@ -55,7 +55,7 @@ pub(crate) fn module_root_for_generated_file(path: &Path) -> Option<PathBuf> {
 /// `<X>/src/<sourceset>/...` → `<X>`.
 pub(crate) fn module_root_for_source_file(path: &Path) -> Option<PathBuf> {
     let components: Vec<Component<'_>> = path.components().collect();
-    let source_index = components.iter().position(
+    let source_index = components.iter().rposition(
         |component| matches!(component, Component::Normal(name) if name.to_str() == Some("src")),
     )?;
     if source_index == 0 {
@@ -94,13 +94,11 @@ fn is_binding_java_filename(path: &Path) -> bool {
 // ─── Name mapping (AGP ViewBinding conventions) ───────────────────────────────
 
 /// Layout file name → generated binding class name (`foo_bar` → `FooBarBinding`).
-#[allow(dead_code)] // PR 4 navigation
 pub(crate) fn binding_class_name_for_layout(layout_name: &str) -> String {
     format!("{}Binding", snake_case_to_pascal_case(layout_name))
 }
 
 /// Generated binding class name → layout file name (`FooBarBinding` → `foo_bar`).
-#[allow(dead_code)] // PR 4 navigation
 pub(crate) fn layout_name_for_binding_class(class_name: &str) -> Option<String> {
     let base = class_name.strip_suffix("Binding")?;
     if base.is_empty() {
@@ -329,31 +327,38 @@ struct BindingDiscoveryRequest {
 /// Cheap handle for enqueueing per-module generated binding discovery.
 #[derive(Clone)]
 pub(crate) struct BindingDiscoveryHandle {
-    tx: Option<mpsc::UnboundedSender<BindingDiscoveryRequest>>,
-    in_flight: Arc<DashSet<PathBuf>>,
+    sender: Option<mpsc::UnboundedSender<BindingDiscoveryRequest>>,
+    in_progress: Arc<DashSet<PathBuf>>,
+    rerun_requested: Arc<DashSet<PathBuf>>,
 }
 
 impl BindingDiscoveryHandle {
     pub(crate) fn noop() -> Self {
         Self {
-            tx: None,
-            in_flight: Arc::new(DashSet::new()),
+            sender: None,
+            in_progress: Arc::new(DashSet::new()),
+            rerun_requested: Arc::new(DashSet::new()),
         }
     }
 
-    /// Enqueue discovery for `module_root`. Duplicate in-flight requests are coalesced.
+    /// Enqueue discovery for `module_root`. Duplicate in-flight requests set a rerun flag.
     pub(crate) fn request(&self, module_root: PathBuf) {
-        let Some(ref sender) = self.tx else {
+        let Some(ref sender) = self.sender else {
             return;
         };
-        if !self.in_flight.insert(module_root.clone()) {
+        if self.in_progress.contains(&module_root) {
+            self.rerun_requested.insert(module_root);
+            return;
+        }
+        if !self.in_progress.insert(module_root.clone()) {
             return;
         }
         let _ = sender.send(BindingDiscoveryRequest { module_root });
     }
 
     pub(crate) fn clear(&self) {
-        self.in_flight.clear();
+        self.in_progress.clear();
+        self.rerun_requested.clear();
     }
 }
 
@@ -362,22 +367,31 @@ pub(crate) fn spawn_binding_discovery_worker(
     indexer: Arc<super::Indexer>,
 ) -> BindingDiscoveryHandle {
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let in_flight = Arc::new(DashSet::new());
+    let in_progress = Arc::new(DashSet::new());
+    let rerun_requested = Arc::new(DashSet::new());
     let handle = BindingDiscoveryHandle {
-        tx: Some(sender),
-        in_flight: Arc::clone(&in_flight),
+        sender: Some(sender.clone()),
+        in_progress: Arc::clone(&in_progress),
+        rerun_requested: Arc::clone(&rerun_requested),
     };
     tokio::spawn(async move {
         while let Some(request) = receiver.recv().await {
             let module_root = request.module_root;
+            let module_for_blocking = module_root.clone();
             let indexer = Arc::clone(&indexer);
-            let in_flight = Arc::clone(&in_flight);
+            let in_progress = Arc::clone(&in_progress);
+            let rerun_requested = Arc::clone(&rerun_requested);
             tokio::task::spawn_blocking(move || {
-                indexer.index_generated_bindings(&module_root);
-                in_flight.remove(&module_root);
+                indexer.index_generated_bindings(&module_for_blocking);
             })
             .await
             .ok();
+            in_progress.remove(&module_root);
+            if rerun_requested.remove(&module_root).is_some()
+                && in_progress.insert(module_root.clone())
+            {
+                let _ = sender.send(BindingDiscoveryRequest { module_root });
+            }
         }
     });
     handle
@@ -404,15 +418,14 @@ impl super::Indexer {
     /// Idempotent and additive — safe to call repeatedly.
     ///
     pub(crate) fn set_databinding_watcher_handle(&self, handle: DatabindingWatcherHandle) {
-        // Modules discovered during early workspace indexing ran
-        // `index_generated_bindings` against the noop handle, so their roots
-        // never entered a poll watcher's watched set. Re-register them here so
-        // the real watcher polls modules discovered before it was installed.
-        for module in self.generated_bindings.iter() {
-            handle.watch_module(module.key());
-        }
         if let Ok(mut guard) = self.databinding_watcher.write() {
             *guard = handle;
+        }
+        // Re-register modules discovered before the real watcher was installed.
+        if let Ok(watcher) = self.databinding_watcher.read() {
+            for module in self.generated_bindings.iter() {
+                watcher.watch_module(module.key());
+            }
         }
     }
 
@@ -426,6 +439,12 @@ impl super::Indexer {
             .get(module_root)
             .map(|module| Arc::clone(module.value()));
 
+        if let Some(previous_bindings) = &previous_bindings {
+            for previous_entry in previous_bindings.entries.values() {
+                self.generated_binding_uris.remove(&previous_entry.file_uri);
+            }
+        }
+
         let discovered = discover_generated_bindings(module_root);
         let entries: HashMap<String, GeneratedBindingEntry> = discovered
             .into_iter()
@@ -437,6 +456,9 @@ impl super::Indexer {
                 entries: entries.clone(),
             }),
         );
+        for entry in entries.values() {
+            self.generated_binding_uris.insert(entry.file_uri.clone());
+        }
 
         if let Some(previous_bindings) = previous_bindings {
             self.remove_undiscovered_binding_files_from_index(&previous_bindings, &entries);
@@ -470,6 +492,7 @@ impl super::Indexer {
             if still_discovered {
                 continue;
             }
+            self.generated_binding_uris.remove(&previous_entry.file_uri);
             self.remove_stale_for_uri(&previous_entry.file_uri);
             self.files.remove(&previous_entry.file_uri);
         }
@@ -493,7 +516,6 @@ impl super::Indexer {
     }
 
     /// Layout variants for a binding class in the given module, default variant first.
-    #[allow(dead_code)] // PR 4 navigation
     pub(crate) fn layouts_for_binding_class(
         &self,
         class_name: &str,
@@ -502,29 +524,10 @@ impl super::Indexer {
         let Some(layout_name) = layout_name_for_binding_class(class_name) else {
             return Vec::new();
         };
-        let mut layouts: Vec<Arc<LayoutFileData>> = self
-            .layouts
-            .iter()
-            .filter_map(|entry| {
-                let data = entry.value();
-                if data.module_root.as_path() == module_root && data.layout_name == layout_name {
-                    Some(Arc::clone(data))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        layouts.sort_by(|left, right| {
-            match (
-                left.variant_qualifier.is_empty(),
-                right.variant_qualifier.is_empty(),
-            ) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => left.variant_qualifier.cmp(&right.variant_qualifier),
-            }
-        });
-        layouts
+        self.matching_layout_entries(module_root, &layout_name)
+            .into_iter()
+            .map(|(_uri, data)| data)
+            .collect()
     }
 
     /// Direct read from the layout side index.
@@ -537,6 +540,29 @@ impl super::Indexer {
         module_root: &Path,
         layout_name: &str,
     ) -> Vec<(String, Arc<LayoutFileData>)> {
+        let key = (module_root.to_path_buf(), layout_name.to_string());
+        if let Some(uris) = self.layouts_by_module_and_name.get(&key) {
+            let mut entries: Vec<(String, Arc<LayoutFileData>)> = uris
+                .iter()
+                .filter_map(|uri| {
+                    self.layouts
+                        .get(uri)
+                        .map(|entry| (uri.clone(), Arc::clone(entry.value())))
+                })
+                .collect();
+            entries.sort_by(|left, right| {
+                match (
+                    left.1.variant_qualifier.is_empty(),
+                    right.1.variant_qualifier.is_empty(),
+                ) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => left.1.variant_qualifier.cmp(&right.1.variant_qualifier),
+                }
+            });
+            return entries;
+        }
+
         let mut entries: Vec<(String, Arc<LayoutFileData>)> = self
             .layouts
             .iter()
@@ -646,13 +672,7 @@ impl super::Indexer {
 
     /// True when `uri` is a discovered generated binding file (side-index membership).
     pub(crate) fn is_generated_binding_uri(&self, uri: &str) -> bool {
-        self.generated_bindings.iter().any(|module| {
-            module
-                .value()
-                .entries
-                .values()
-                .any(|entry| entry.file_uri == uri)
-        })
+        self.generated_binding_uris.contains(uri)
     }
 
     pub(crate) fn restore_generated_bindings_from_cache(
@@ -661,23 +681,52 @@ impl super::Indexer {
     ) {
         for (module_root_string, cache_entry) in cached {
             let module_root = PathBuf::from(module_root_string);
-            self.generated_bindings.insert(
-                module_root.clone(),
-                Arc::new(ModuleBindings {
-                    entries: cache_entry.entries.clone(),
-                }),
-            );
-            for entry in cache_entry.entries.values() {
+            let mut fresh_entries = HashMap::new();
+            let mut needs_rediscovery = false;
+
+            for (class_name, entry) in &cache_entry.entries {
                 let Ok(uri) = Url::parse(&entry.file_uri) else {
+                    needs_rediscovery = true;
                     continue;
                 };
-                if let Ok(path) = uri.to_file_path() {
-                    if path.exists() {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            self.index_content(&uri, &content);
-                        }
-                    }
+                let Ok(path) = uri.to_file_path() else {
+                    needs_rediscovery = true;
+                    continue;
+                };
+                if !path.exists() {
+                    needs_rediscovery = true;
+                    continue;
                 }
+                let current_mtime = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+                if current_mtime != entry.modified_at_secs {
+                    needs_rediscovery = true;
+                }
+                fresh_entries.insert(class_name.clone(), entry.clone());
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    self.index_content(&uri, &content);
+                }
+            }
+
+            let entries_empty = fresh_entries.is_empty();
+            if !entries_empty {
+                for entry in fresh_entries.values() {
+                    self.generated_binding_uris.insert(entry.file_uri.clone());
+                }
+                self.generated_bindings.insert(
+                    module_root.clone(),
+                    Arc::new(ModuleBindings {
+                        entries: fresh_entries,
+                    }),
+                );
+            }
+
+            if needs_rediscovery || entries_empty {
+                self.request_generated_binding_discovery(module_root);
             }
         }
     }

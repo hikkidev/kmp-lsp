@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -79,9 +80,21 @@ fn parse_layout_xml_include_without_id() {
 }
 
 #[test]
-fn parse_layout_xml_malformed_returns_best_effort_without_panic() {
-    let parsed = parse_layout_xml("");
+fn parse_layout_xml_malformed_lone_quote_does_not_panic() {
+    let content = r#"<TextView android:id="" />"#;
+    let parsed = parse_layout_xml(content);
     assert!(parsed.view_ids.is_empty());
+}
+
+#[test]
+fn layout_path_components_uses_last_src_not_parent_src_directory() {
+    let path = PathBuf::from("home/user/src/myproject/app/src/main/res/layout/foo_bar.xml");
+    let components = layout_path_components(&path).expect("layout under nested src dirs");
+    assert_eq!(
+        components.module_root,
+        PathBuf::from("home/user/src/myproject/app")
+    );
+    assert_eq!(components.layout_name, "foo_bar");
 }
 
 #[test]
@@ -144,7 +157,7 @@ fn remove_layout_clears_side_index_entry() {
 fn layout_cache_roundtrip() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("workspace");
-    std::fs::create_dir_all(&root).expect("mkdir workspace");
+    fs::create_dir_all(&root).expect("mkdir workspace");
 
     let components = LayoutPathComponents {
         module_root: PathBuf::from("app"),
@@ -186,4 +199,84 @@ fn layout_cache_roundtrip() {
             .iter()
             .any(|view_id| view_id.id == "title"));
     });
+}
+
+#[test]
+fn layout_cache_restore_populates_secondary_index() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let module_root = temp.path().join("app");
+    let layout_path = module_root.join("src/main/res/layout/foo_bar.xml");
+    fs::create_dir_all(layout_path.parent().unwrap()).expect("mkdir layout");
+    fs::write(&layout_path, SAMPLE_LAYOUT).expect("write layout");
+
+    let warm_indexer = Indexer::new();
+    let uri = Url::from_file_path(&layout_path).expect("layout uri");
+    warm_indexer.index_layout_content(&uri, SAMPLE_LAYOUT);
+
+    with_xdg_cache(temp.path(), || {
+        save_cache(
+            root,
+            &warm_indexer.files,
+            &warm_indexer.content_hashes,
+            &warm_indexer.library_uris,
+            &warm_indexer.layouts,
+            &warm_indexer.generated_bindings,
+            true,
+            true,
+        );
+
+        let loaded = try_load_cache(root).expect("cache loaded");
+        let path_string = layout_path.to_string_lossy().to_string();
+        let cache_entry = loaded
+            .layouts
+            .get(&path_string)
+            .expect("layout cache entry");
+
+        let restored_indexer = Indexer::new();
+        let uri_string = uri.to_string();
+        restored_indexer
+            .layouts
+            .insert(uri_string.clone(), Arc::clone(&cache_entry.data));
+        restored_indexer.insert_layout_secondary_index(&uri_string, &cache_entry.data);
+
+        let key = (
+            cache_entry.data.module_root.clone(),
+            cache_entry.data.layout_name.clone(),
+        );
+        let uris = restored_indexer
+            .layouts_by_module_and_name
+            .get(&key)
+            .expect("secondary index populated on warm restore");
+        assert_eq!(uris.len(), 1);
+        assert_eq!(uris[0], uri_string);
+
+        let layouts = restored_indexer
+            .layouts_for_binding_class("FooBarBinding", cache_entry.data.module_root.as_path());
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].layout_name, "foo_bar");
+    });
+}
+
+#[test]
+fn insert_layout_secondary_index_dedups_reindex() {
+    let indexer = Indexer::new();
+    let components = LayoutPathComponents {
+        module_root: PathBuf::from("app"),
+        layout_name: "foo_bar".to_string(),
+        variant_qualifier: String::new(),
+    };
+    let parsed = parse_layout_xml(SAMPLE_LAYOUT);
+    let data = build_layout_file_data(&components, &parsed).expect("layout data");
+    let uri = "file:///app/src/main/res/layout/foo_bar.xml";
+
+    indexer.insert_layout_secondary_index(uri, &data);
+    indexer.insert_layout_secondary_index(uri, &data);
+
+    let key = (PathBuf::from("app"), "foo_bar".to_string());
+    let uris = indexer
+        .layouts_by_module_and_name
+        .get(&key)
+        .expect("secondary index entry");
+    assert_eq!(uris.len(), 1);
 }
