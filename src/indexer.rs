@@ -67,7 +67,7 @@ mod discover;
 
 mod layout;
 pub(crate) use self::layout::{
-    is_layout_xml_path, layout_path_components, LayoutCacheEntry, LayoutFileData,
+    is_layout_xml_path, layout_path_components, strip_xml_quotes, LayoutCacheEntry, LayoutFileData,
 };
 
 mod binding_discovery;
@@ -122,7 +122,7 @@ pub(crate) use scope::is_id_char;
 pub(crate) use scope::last_ident_in;
 
 pub(crate) mod live_tree;
-pub(crate) use live_tree::LiveDoc;
+pub(crate) use live_tree::{LiveDoc, RequestParseCache};
 mod live_tree_impl;
 
 // Re-export cache/scan items needed by the inline test module below.
@@ -324,6 +324,12 @@ pub(crate) struct Indexer {
     pub(crate) layouts: DashMap<String, Arc<LayoutFileData>>,
     /// Module root → discovered generated ViewBinding Java files.
     pub(crate) generated_bindings: DashMap<PathBuf, Arc<ModuleBindings>>,
+    /// O(1) membership test for generated binding file URIs.
+    pub(crate) generated_binding_uris: DashSet<String>,
+    /// Secondary index: (module_root, layout_name) → layout file URIs (default variant first).
+    pub(crate) layouts_by_module_and_name: DashMap<(PathBuf, String), Vec<String>>,
+    /// Modules whose layout XML has been enumerated by `ensure_module_layouts_indexed`.
+    pub(crate) layouts_indexed_modules: DashSet<PathBuf>,
     /// Handle for enqueueing background generated-binding discovery.
     pub(crate) binding_discovery: std::sync::RwLock<BindingDiscoveryHandle>,
     /// Handle for registering module roots with the server-side databinding poll watcher.
@@ -605,6 +611,9 @@ impl Indexer {
             extension_by_receiver: DashMap::new(),
             layouts: DashMap::new(),
             generated_bindings: DashMap::new(),
+            generated_binding_uris: DashSet::new(),
+            layouts_by_module_and_name: DashMap::new(),
+            layouts_indexed_modules: DashSet::new(),
             binding_discovery: std::sync::RwLock::new(BindingDiscoveryHandle::noop()),
             databinding_watcher: std::sync::RwLock::new(DatabindingWatcherHandle::noop()),
         }
@@ -726,6 +735,9 @@ impl Indexer {
         self.sig_fast_cache.clear();
         self.layouts.clear();
         self.generated_bindings.clear();
+        self.generated_binding_uris.clear();
+        self.layouts_by_module_and_name.clear();
+        self.layouts_indexed_modules.clear();
         if let Ok(handle) = self.binding_discovery.read() {
             handle.clear();
         }
@@ -960,7 +972,9 @@ impl Indexer {
     }
 
     pub(crate) fn remove_layout(&self, uri: &Url) {
-        self.layouts.remove(uri.as_str());
+        if let Some((_, data)) = self.layouts.remove(uri.as_str()) {
+            self.remove_layout_secondary_index(&data, uri.as_str());
+        }
     }
 
     /// Read accessor for the layout side index; used by ViewBinding navigation (PR 4+).

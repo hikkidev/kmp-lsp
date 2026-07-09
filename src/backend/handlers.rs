@@ -52,8 +52,10 @@ impl Backend {
         if let Ok(path) = uri.to_file_path() {
             if crate::indexer::is_layout_xml_path(&path) {
                 log::info!("viewbinding: references on layout xml uri={uri}");
+                let mut parse_cache = crate::indexer::RequestParseCache::new();
                 let locations = crate::features::viewbinding::find_layout_xml_references(
                     &self.indexer,
+                    &mut parse_cache,
                     uri,
                     position,
                     params.context.include_declaration,
@@ -89,9 +91,10 @@ impl Backend {
                     uri,
                 )
             {
-                let _parse_cache = crate::indexer::RequestParseCacheGuard::new();
+                let mut parse_cache = crate::indexer::RequestParseCache::new();
                 let locations = crate::features::viewbinding::find_binding_field_references(
                     &self.indexer,
+                    &mut parse_cache,
                     &expected_class,
                     &ctx.word,
                     uri,

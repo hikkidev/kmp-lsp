@@ -17,8 +17,41 @@ use crate::features::viewbinding::{
     format_binding_field_hover, java_field_type_from_detail, remap_generated_binding_definitions,
     resolve_expected_binding_class, short_type_name,
 };
-use crate::indexer::{binding_field_name_to_id, binding_id_to_field_name, Indexer};
+use crate::indexer::{
+    binding_field_name_to_id, binding_id_to_field_name, Indexer, RequestParseCache,
+};
 use crate::parser::nullable_at_line;
+
+async fn binding_field_references_for_test(
+    indexer: &Indexer,
+    expected_binding_class: &str,
+    field_name: &str,
+    uri: &Url,
+    line: u32,
+    include_decl: bool,
+) -> Vec<Location> {
+    let mut parse_cache = RequestParseCache::new();
+    find_binding_field_references(
+        indexer,
+        &mut parse_cache,
+        expected_binding_class,
+        field_name,
+        uri,
+        line,
+        include_decl,
+    )
+    .await
+}
+
+async fn layout_xml_references_for_test(
+    indexer: &Indexer,
+    uri: &Url,
+    position: Position,
+    include_decl: bool,
+) -> Option<Vec<Location>> {
+    let mut parse_cache = RequestParseCache::new();
+    find_layout_xml_references(indexer, &mut parse_cache, uri, position, include_decl).await
+}
 
 const FOO_BAR_LAYOUT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -444,7 +477,7 @@ async fn binding_field_references_find_qualified_usages() {
             .expect("expected binding class");
     assert_eq!(expected, "FooBarBinding");
 
-    let references = find_binding_field_references(
+    let references = binding_field_references_for_test(
         &fixture.indexer,
         &expected,
         "title",
@@ -483,7 +516,7 @@ fun use(competitor: Competitor) {
         .index_content(&competitor_uri, competitor_source);
 
     let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
-    let references = find_binding_field_references(
+    let references = binding_field_references_for_test(
         &fixture.indexer,
         "FooBarBinding",
         "title",
@@ -562,7 +595,7 @@ class StaleFieldUsage {
         .index_content(&stale_usage_uri, kotlin_with_stale_field);
 
     let position = ViewBindingFixture::position_in(kotlin_with_stale_field, "binding.subtitle");
-    let references = find_binding_field_references(
+    let references = binding_field_references_for_test(
         &fixture.indexer,
         "FooBarBinding",
         "subtitle",
@@ -615,7 +648,7 @@ fun misleadingApply(competitor: NotABinding) {
         .index_content(&scope_function_uri, scope_function_source);
 
     let position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
-    let references = find_binding_field_references(
+    let references = binding_field_references_for_test(
         &fixture.indexer,
         "FooBarBinding",
         "title",
@@ -663,12 +696,12 @@ async fn xml_references_match_kotlin_side() {
 
     let xml_position = ViewBindingFixture::position_in(FOO_BAR_LAYOUT, "@+id/title");
     let xml_refs =
-        find_layout_xml_references(&fixture.indexer, &default_layout_uri, xml_position, false)
+        layout_xml_references_for_test(&fixture.indexer, &default_layout_uri, xml_position, false)
             .await
             .expect("xml references");
 
     let kotlin_position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
-    let kotlin_refs = find_binding_field_references(
+    let kotlin_refs = binding_field_references_for_test(
         &fixture.indexer,
         "FooBarBinding",
         "title",
@@ -1147,7 +1180,7 @@ fun misleadingWith(competitor: NotABinding) {
     }
 
     let anchor_position = ViewBindingFixture::position_in(&fixture.kotlin_source, "binding.title");
-    let references = find_binding_field_references(
+    let references = binding_field_references_for_test(
         &fixture.indexer,
         "FooBarBinding",
         "title",
@@ -1220,7 +1253,7 @@ async fn chained_include_field_references_from_nested_position() {
             .expect("expected ViewHeaderBinding for chained include field");
     assert_eq!(expected_class, "ViewHeaderBinding");
 
-    let references = find_binding_field_references(
+    let references = binding_field_references_for_test(
         &fixture.indexer,
         &expected_class,
         "title",
@@ -1582,7 +1615,7 @@ class Decoy {
 
     let xml_position = ViewBindingFixture::position_in(AVATAR_LAYOUT, "@+id/avatar");
     let references =
-        find_layout_xml_references(&fixture.indexer, &fixture.layout_uri, xml_position, false)
+        layout_xml_references_for_test(&fixture.indexer, &fixture.layout_uri, xml_position, false)
             .await
             .expect("layout xml references");
 

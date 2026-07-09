@@ -11,10 +11,7 @@ use crate::backend::format::format_contextual_hover;
 use crate::features::definition::locs_to_opt_response;
 use crate::features::references::find_references_with_qualifier;
 use crate::features::traits::{DocumentAccess, SymbolIndex};
-use crate::indexer::live_tree::{
-    lang_for_path, parse_live, request_parse_cache_get, request_parse_cache_insert,
-    utf16_col_to_byte,
-};
+use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte, RequestParseCache};
 use crate::indexer::NodeExt;
 use crate::indexer::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_field_type,
@@ -766,7 +763,7 @@ fn binding_class_for_bare_field_at(
     position: Position,
     field_name: &str,
 ) -> Option<String> {
-    let (tree, bytes) = live_or_disk_tree(index, uri)?;
+    let (tree, bytes) = live_or_disk_tree(index, None, uri)?;
     let line_text = index
         .mem_lines_for(uri.as_str())?
         .get(position.line as usize)?
@@ -849,6 +846,7 @@ fn receiver_matches_binding_class(
 /// Find Kotlin usages of a binding field, verified by receiver type.
 pub(crate) async fn find_binding_field_references(
     index: &Indexer,
+    parse_cache: &mut RequestParseCache,
     expected_binding_class: &str,
     field_name: &str,
     uri: &Url,
@@ -863,7 +861,13 @@ pub(crate) async fn find_binding_field_references(
         .into_iter()
         .filter(|location| !index.is_generated_binding_uri(location.uri.as_str()))
         .filter(|location| {
-            verify_binding_field_reference(index, location, field_name, expected_binding_class)
+            verify_binding_field_reference(
+                index,
+                parse_cache,
+                location,
+                field_name,
+                expected_binding_class,
+            )
         })
         .collect();
     log::debug!(
@@ -878,11 +882,12 @@ pub(crate) async fn find_binding_field_references(
 
 fn verify_binding_field_reference(
     index: &Indexer,
+    parse_cache: &mut RequestParseCache,
     location: &Location,
     field_name: &str,
     expected_binding_class: &str,
 ) -> bool {
-    let Some((tree, bytes)) = live_or_disk_tree(index, &location.uri) else {
+    let Some((tree, bytes)) = live_or_disk_tree(index, Some(parse_cache), &location.uri) else {
         return false;
     };
     let receiver_type = if let Some(navigation_node) = navigation_expression_at_position(
@@ -968,19 +973,27 @@ fn implicit_receiver_type_for_bare_field(
     None
 }
 
-fn live_or_disk_tree(index: &Indexer, uri: &Url) -> Option<(Tree, Vec<u8>)> {
+fn live_or_disk_tree(
+    index: &Indexer,
+    parse_cache: Option<&mut RequestParseCache>,
+    uri: &Url,
+) -> Option<(Tree, Vec<u8>)> {
     if let Some(document) = index.live_doc(uri) {
         return Some((document.tree.clone(), document.bytes.clone()));
     }
-    if let Some(document) = request_parse_cache_get(uri.as_str()) {
-        return Some((document.tree.clone(), document.bytes.clone()));
+    if let Some(cache) = parse_cache.as_ref() {
+        if let Some(document) = cache.get(uri.as_str()) {
+            return Some((document.tree.clone(), document.bytes.clone()));
+        }
     }
     let path = uri.to_file_path().ok()?;
     let content = std::fs::read_to_string(path).ok()?;
     let language = lang_for_path(uri.path())?;
     let document = parse_live(&content, language)?;
     let document = std::sync::Arc::new(document);
-    request_parse_cache_insert(uri.to_string(), std::sync::Arc::clone(&document));
+    if let Some(cache) = parse_cache {
+        cache.insert(uri.to_string(), std::sync::Arc::clone(&document));
+    }
     Some((document.tree.clone(), document.bytes.clone()))
 }
 
@@ -1158,6 +1171,7 @@ fn pure_field_chain(receiver_node: &Node<'_>, bytes: &[u8]) -> Option<Vec<String
 /// References from `@+id/field` in a layout XML file.
 pub(crate) async fn find_layout_xml_references(
     index: &Indexer,
+    parse_cache: &mut RequestParseCache,
     uri: &Url,
     position: Position,
     include_decl: bool,
@@ -1179,6 +1193,7 @@ pub(crate) async fn find_layout_xml_references(
     );
     let locations = find_binding_field_references(
         index,
+        parse_cache,
         &expected_class,
         &field_name,
         uri,
