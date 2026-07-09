@@ -12,6 +12,7 @@ use crate::features::viewbinding;
 use crate::indexer::IndexRead;
 use crate::parser::parse_by_extension;
 use crate::rg;
+use crate::viewbinding::ViewBindingIndex;
 
 // ─── Response helpers ─────────────────────────────────────────────────────────
 
@@ -46,7 +47,7 @@ fn locations_from_response(response: GotoDefinitionResponse) -> Vec<Location> {
     }
 }
 
-fn remap_definition_response<I: IndexRead>(
+fn remap_definition_response<I: IndexRead + ViewBindingIndex>(
     index: &I,
     response: Option<GotoDefinitionResponse>,
 ) -> Option<GotoDefinitionResponse> {
@@ -155,7 +156,7 @@ pub(crate) async fn goto_super_method(
 /// direct qualified lookups, and rg fallback — in that priority order.
 pub(crate) async fn find_definition(
     ctx: &CursorContext,
-    index: &(impl SymbolIndex + DocumentAccess + SearchAccess + IndexRead),
+    index: &(impl SymbolIndex + DocumentAccess + SearchAccess + IndexRead + ViewBindingIndex),
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {

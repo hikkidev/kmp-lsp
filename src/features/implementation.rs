@@ -20,6 +20,7 @@ use crate::features::viewbinding;
 use crate::indexer::IndexRead;
 use crate::rg;
 use crate::types::FileData;
+use crate::viewbinding::ViewBindingIndex;
 
 /// Find all implementations/subtypes of the symbol under the cursor at `uri`.
 ///
@@ -28,7 +29,7 @@ use crate::types::FileData;
 /// - Otherwise, returns the class/struct locations that implement the named type.
 pub(crate) async fn find_implementation(
     ctx: &CursorContext,
-    index: &(impl SymbolIndex + DocumentAccess + SearchAccess + IndexRead),
+    index: &(impl SymbolIndex + DocumentAccess + SearchAccess + IndexRead + ViewBindingIndex),
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {

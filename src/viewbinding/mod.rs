@@ -2,6 +2,7 @@
 
 pub(crate) mod discovery;
 pub(crate) mod field_type;
+pub(crate) mod index;
 pub(crate) mod layout;
 pub(crate) mod state;
 
@@ -18,6 +19,7 @@ pub(crate) use field_type::{
     binding_field_type, binding_layout_completion_fields, infer_bare_binding_field_type,
     java_field_type_from_detail, short_type_name,
 };
+pub(crate) use index::ViewBindingIndex;
 pub(crate) use layout::{
     element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
     layout_path_components, spawn_layout_indexing_worker, view_id_at_layout_position,

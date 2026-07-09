@@ -30,6 +30,7 @@ use crate::resolver::{
     infer::infer_field_chain_type, infer_receiver_type, infer_receiver_type_at, ReceiverKind,
 };
 use crate::types::{FileData, SymbolEntry};
+use crate::viewbinding::ViewBindingIndex;
 use crate::viewbinding::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
     element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
@@ -44,7 +45,7 @@ const ANDROID_TAG_PREFIXES: &[&str] = &["android.widget.", "android.view.", "and
 // ─── Kotlin-side post-resolution remap (definition only) ───────────────────────
 
 /// Remap generated `*Binding.java` definition targets to layout XML.
-pub(crate) fn remap_generated_binding_definitions<I: IndexRead>(
+pub(crate) fn remap_generated_binding_definitions<I: IndexRead + ViewBindingIndex>(
     index: &I,
     locations: Vec<Location>,
 ) -> Vec<Location> {
@@ -76,7 +77,7 @@ pub(crate) fn remap_generated_binding_definitions<I: IndexRead>(
     remapped
 }
 
-fn remap_single_binding_location<I: IndexRead>(
+fn remap_single_binding_location<I: IndexRead + ViewBindingIndex>(
     index: &I,
     location: &Location,
 ) -> Option<Vec<Location>> {
@@ -149,7 +150,7 @@ fn position_in_class_header(position: Position, class_symbol: &SymbolEntry) -> b
     position_in_range(position, class_symbol.selection_range)
 }
 
-fn remap_binding_class<I: IndexRead>(
+fn remap_binding_class<I: IndexRead + ViewBindingIndex>(
     index: &I,
     symbol: &SymbolEntry,
     module_root: &Path,
@@ -188,7 +189,7 @@ fn location_from_layout_uri(uri_string: &str) -> Option<Url> {
     Url::parse(uri_string).ok()
 }
 
-fn remap_binding_field<I: IndexRead>(
+fn remap_binding_field<I: IndexRead + ViewBindingIndex>(
     index: &I,
     symbol: &SymbolEntry,
     module_root: &Path,
@@ -217,7 +218,7 @@ fn remap_binding_field<I: IndexRead>(
 }
 
 /// Shared layout side-index lookup for a binding field (`@+id` or `<include>`).
-fn layout_targets_for_binding_field<I: IndexRead>(
+fn layout_targets_for_binding_field<I: IndexRead + ViewBindingIndex>(
     index: &I,
     module_root: &Path,
     layout_name: &str,
@@ -231,7 +232,7 @@ fn layout_targets_for_binding_field<I: IndexRead>(
     index.layouts_declaring_view_id(module_root, layout_name, &view_id)
 }
 
-fn remap_root_view<I: IndexRead>(
+fn remap_root_view<I: IndexRead + ViewBindingIndex>(
     index: &I,
     module_root: &Path,
     file_data: &FileData,
@@ -385,7 +386,7 @@ pub(crate) fn binding_field_in_live_layout(
 
 /// Return the raw generated Java class for a `*Binding` type usage — no remap.
 pub(crate) fn find_binding_implementation(
-    index: &(impl SymbolIndex + IndexRead),
+    index: &(impl SymbolIndex + IndexRead + ViewBindingIndex),
     ctx: &CursorContext,
     uri: &Url,
     _position: Position,
@@ -449,7 +450,7 @@ pub(crate) fn find_binding_field_definition(
 
 /// Definition on `@+id/...` or `@id/...` inside a layout XML file.
 pub(crate) fn find_layout_xml_definition(
-    index: &(impl IndexRead + DocumentAccess),
+    index: &(impl IndexRead + ViewBindingIndex + DocumentAccess),
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
@@ -469,7 +470,7 @@ pub(crate) fn find_layout_xml_definition(
 
 /// Implementation on a layout XML element tag name.
 pub(crate) fn find_layout_xml_implementation(
-    index: &(impl SymbolIndex + IndexRead + DocumentAccess),
+    index: &(impl SymbolIndex + IndexRead + ViewBindingIndex + DocumentAccess),
     uri: &Url,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
@@ -547,7 +548,7 @@ fn binding_file_uri_for_source(index: &Indexer, uri: &Url, class_name: &str) -> 
 }
 
 /// When `location` is a generated binding field, return Kotlin-style hover markdown.
-pub(crate) fn binding_field_hover_at_location<I: IndexRead>(
+pub(crate) fn binding_field_hover_at_location<I: IndexRead + ViewBindingIndex>(
     index: &I,
     location: &Location,
     field_name: &str,
