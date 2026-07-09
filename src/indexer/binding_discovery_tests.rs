@@ -142,6 +142,19 @@ fn binding_name_mapping_roundtrip_and_edge_cases() {
 
     assert_eq!(binding_id_to_field_name("foo_bar"), "fooBar");
     assert_eq!(binding_field_name_to_id("fooBar"), "foo_bar");
+
+    assert_eq!(binding_class_name_for_layout("url"), "UrlBinding");
+    assert_eq!(
+        layout_name_for_binding_class("UrlBinding"),
+        Some("url".to_string())
+    );
+    assert_eq!(binding_class_name_for_layout("u_r_l"), "URLBinding");
+    assert_eq!(
+        layout_name_for_binding_class("URLBinding"),
+        Some("u_r_l".to_string())
+    );
+    assert_eq!(binding_id_to_field_name("u_r_l"), "uRL");
+    assert_eq!(binding_field_name_to_id("uRL"), "u_r_l");
 }
 
 #[test]
