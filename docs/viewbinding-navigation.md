@@ -144,9 +144,17 @@ qualified `binding.field` and bare implicit-`this` members inside
 nearer local declaration shadows, so a local `val title` inside
 `with(binding) { … }` is never reported as stale.
 
-Definition/hover/references requests themselves stay **silently empty** when
-unresolvable — exactly like any other unresolved symbol. The diagnostics
-carry the explanation; the requests do not.
+Definition/hover/references requests stay **silently empty** when the symbol
+cannot be resolved at all — exactly like any other unresolved symbol. The
+diagnostics carry the explanation for ungenerated or stale bindings; the
+requests themselves do not emit warnings.
+
+When **definition** resolves to a generated `*Binding.java` symbol but XML
+remapping cannot find a target (no layout variants indexed, field id absent from
+every variant, etc.), the **generated Java location is kept** rather than
+returning empty. Field remap misses must not fall back to the binding *class*
+layout header — only the precise Java symbol location passes through.
+**Implementation** is unchanged: it always returns raw Java.
 
 ### Staleness model
 
@@ -265,6 +273,10 @@ package `*.databinding`), the result is remapped:
 | an id-backed field | the `@+id` position in every declaring variant | raw Java location |
 | an `<include>`-backed field | the `<include>` tag | raw Java location |
 | `rootView` field / `getRoot()` | the XML root tag | raw Java location |
+
+**Remap miss (definition only):** when remapping cannot produce XML targets for
+a resolved generated-Java symbol, the original Java location is returned
+(see *Diagnostics* above for the silently-empty vs Java-fallback split).
 
 Hover uses the Java symbol's type info untouched (plus the Kotlin-style
 rendering described above).

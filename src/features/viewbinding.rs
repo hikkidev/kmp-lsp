@@ -1,4 +1,9 @@
 //! ViewBinding navigation — post-resolution remap, hover, references (PR 4–5).
+//!
+//! Definition remap miss policy: keep the resolved generated-Java location when
+//! XML targets are unavailable (no layouts, missing `@+id`, etc.). Field misses
+//! must not fall back to the binding class layout header. Unresolved symbols
+//! stay silently empty; diagnostics explain build/staleness issues.
 
 use std::path::Path;
 
