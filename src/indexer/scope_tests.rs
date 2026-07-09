@@ -630,6 +630,30 @@ class Outer {
 }
 
 #[test]
+fn lambda_params_at_col_with_cache_reuses_request_parse_cache() {
+    use crate::indexer::RequestParseCache;
+
+    let source = "val x = items.map { item ->\n    item.id\n}";
+    let (uri, indexer) = indexed("/t.kt", source);
+    indexer.set_live_lines(&uri, source);
+
+    let mut parse_cache = RequestParseCache::new();
+    let first = indexer
+        .live_doc_or_parse_with_cache(&uri, &mut parse_cache)
+        .expect("first parse");
+    let second = indexer
+        .live_doc_or_parse_with_cache(&uri, &mut parse_cache)
+        .expect("cached parse");
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+
+    let params = indexer.lambda_params_at_col_with_cache(&uri, 1, 4, Some(&mut parse_cache));
+    assert!(
+        params.contains(&"item".to_string()),
+        "CST path must collect 'item', got: {params:?}"
+    );
+}
+
+#[test]
 fn lambda_params_at_col_cst_collects_named() {
     let src = "val x = items.map { item ->\n    item.id\n}";
     let (u, indexer) = indexed_with_live("/t.kt", src);

@@ -49,14 +49,8 @@ pub(crate) async fn find_references_with_qualifier_cached(
     index: &(impl SymbolIndex + DocumentAccess + ScopeQuery + SearchAccess + Send + Sync),
     parse_cache: Option<&mut RequestParseCache>,
 ) -> Vec<Location> {
-    let (parent_class, declared_pkg) = resolve_scope_with_qualifier(
-        index,
-        uri,
-        line,
-        name,
-        qualifier,
-        parse_cache,
-    );
+    let (parent_class, declared_pkg) =
+        resolve_scope_with_qualifier(index, uri, line, name, qualifier, parse_cache);
 
     // A lowercase usage of a JAR/library symbol now also produces a `declared_pkg`
     // (the JAR symbol's package), but the request site is a *usage*, not the symbol's

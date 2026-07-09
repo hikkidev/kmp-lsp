@@ -356,12 +356,24 @@ pub(crate) fn find_named_lambda_param_type(
 ///
 /// Used to avoid triggering lambda inference for ordinary local variables
 /// that just happen to be lowercase.  Handles single and multi-param lambdas.
+#[allow(dead_code)] // used by scope_tests; convenience wrapper over `is_lambda_param_with_cache`
 pub(crate) fn is_lambda_param(
     recv: &str,
     before_cur: &str,
     idx: &Indexer,
     uri: &Url,
     cursor_line: usize,
+) -> bool {
+    is_lambda_param_with_cache(recv, before_cur, idx, uri, cursor_line, None)
+}
+
+pub(crate) fn is_lambda_param_with_cache(
+    recv: &str,
+    before_cur: &str,
+    idx: &Indexer,
+    uri: &Url,
+    cursor_line: usize,
+    parse_cache: Option<&mut crate::indexer::RequestParseCache>,
 ) -> bool {
     // Fast reject: if `recv` starts with uppercase or contains `.` it's a type/qualified
     // name, never a lambda parameter name.
@@ -383,9 +395,9 @@ pub(crate) fn is_lambda_param(
     // brace-depth text scan covering up to 50 prior lines — both more thorough
     // than the old 10-line ad-hoc scan here.
     let cursor_col = before_cur.encode_utf16().count();
-    idx.lambda_params_at_col(uri, cursor_line, cursor_col)
+    idx.lambda_params_at_col_with_cache(uri, cursor_line, cursor_col, parse_cache)
         .iter()
-        .any(|p| p == recv)
+        .any(|param| param == recv)
 }
 
 fn find_it_element_type_in_lines_impl(

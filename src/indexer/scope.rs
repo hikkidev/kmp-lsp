@@ -217,6 +217,16 @@ impl Indexer {
         uri: &Url,
         position: Position,
     ) -> Option<String> {
+        self.infer_lambda_param_type_at_with_cache(name, uri, position, None)
+    }
+
+    pub(crate) fn infer_lambda_param_type_at_with_cache(
+        &self,
+        name: &str,
+        uri: &Url,
+        position: Position,
+        parse_cache: Option<&mut super::RequestParseCache>,
+    ) -> Option<String> {
         let line_no = position.line as usize;
 
         // Prefer live_lines (current editor content, updated synchronously on
@@ -259,7 +269,7 @@ impl Indexer {
             // Fallback for `this` in a regular class method body (not a lambda):
             // scan backward for the enclosing class/object declaration.
             if name == "this" {
-                return self.enclosing_class_at(uri, position.line);
+                return self.enclosing_class_at_with_cache(uri, position.line, parse_cache);
             }
             None
         } else {
@@ -270,13 +280,13 @@ impl Indexer {
             // that produced `position` — prevents a race where did_change updates
             // live_doc between the caller's position derivation and our CST lookup.
             let utf16_col = position.character as usize;
-            let live_doc_arc = self.live_doc(uri);
+            let live_doc_arc = self.live_doc_for_scope_query(uri, parse_cache)?;
             find_named_lambda_param_type_in_lines(
                 &lines,
                 name,
                 line_no,
                 utf16_col,
-                live_doc_arc.as_deref(),
+                Some(live_doc_arc.as_ref()),
                 self,
                 uri,
             )
@@ -294,6 +304,7 @@ impl Indexer {
     /// Example — cursor inside `{ resultState -> … }`:
     ///   `reloadableProduct(…, { isRefresh -> … }) { resultState -> │ }`
     ///   → returns `["resultState"]`,  NOT `["isRefresh", "resultState"]`
+    #[allow(dead_code)] // used by scope_tests; convenience wrapper over `lambda_params_at_col`
     pub(crate) fn lambda_params_at(&self, uri: &Url, cursor_line: usize) -> Vec<String> {
         self.lambda_params_at_col(uri, cursor_line, usize::MAX)
     }
@@ -313,7 +324,19 @@ impl Indexer {
         cursor_line: usize,
         cursor_col: usize,
     ) -> Vec<String> {
-        if let Some(params) = self.cst_lambda_params_at_col(uri, cursor_line, cursor_col) {
+        self.lambda_params_at_col_with_cache(uri, cursor_line, cursor_col, None)
+    }
+
+    pub(crate) fn lambda_params_at_col_with_cache(
+        &self,
+        uri: &Url,
+        cursor_line: usize,
+        cursor_col: usize,
+        parse_cache: Option<&mut super::RequestParseCache>,
+    ) -> Vec<String> {
+        if let Some(params) =
+            self.cst_lambda_params_at_col(uri, cursor_line, cursor_col, parse_cache)
+        {
             return params;
         }
 
@@ -326,8 +349,9 @@ impl Indexer {
         uri: &Url,
         cursor_line: usize,
         cursor_col: usize,
+        parse_cache: Option<&mut super::RequestParseCache>,
     ) -> Option<Vec<String>> {
-        let doc = self.live_doc(uri)?;
+        let doc = self.live_doc_for_scope_query(uri, parse_cache)?;
         let line_text = self
             .live_lines
             .get(uri.as_str())
