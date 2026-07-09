@@ -67,7 +67,8 @@ mod discover;
 
 mod layout;
 pub(crate) use self::layout::{
-    is_layout_xml_path, layout_path_components, strip_xml_quotes, LayoutCacheEntry, LayoutFileData,
+    element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
+    layout_path_components, view_id_at_layout_position, LayoutCacheEntry, LayoutFileData,
 };
 
 mod binding_discovery;

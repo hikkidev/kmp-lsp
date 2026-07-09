@@ -1,10 +1,9 @@
 //! ViewBinding navigation — post-resolution remap, hover, references (PR 4–5).
 
-use std::cell::RefCell;
 use std::path::Path;
 
 use tower_lsp::lsp_types::{GotoDefinitionResponse, Location, Position, Range, SymbolKind, Url};
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, Tree};
 
 use crate::backend::cursor::CursorContext;
 use crate::backend::format::format_contextual_hover;
@@ -15,15 +14,13 @@ use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte, Re
 use crate::indexer::NodeExt;
 use crate::indexer::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_field_type,
-    binding_id_to_field_name, find_this_context_in_lines, is_layout_xml_path,
-    layout_name_for_binding_class, layout_path_components, module_root_for_generated_file,
-    module_root_for_source_file, strip_xml_quotes, IndexRead, Indexer, ThisContext,
+    binding_id_to_field_name, element_tag_at_layout_position, find_this_context_in_lines,
+    id_attribute_position_for_view_id, is_layout_xml_path, layout_name_for_binding_class,
+    layout_path_components, module_root_for_generated_file, module_root_for_source_file,
+    view_id_at_layout_position, IndexRead, Indexer, ThisContext,
 };
 use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
-use crate::queries::{
-    KIND_NAV_EXPR, KIND_SIMPLE_IDENT, KIND_THIS_EXPR, KIND_XML_ATT_VALUE, KIND_XML_DOCUMENT,
-    KIND_XML_ELEMENT, KIND_XML_EMPTY_ELEM_TAG, KIND_XML_NAME, KIND_XML_STAG,
-};
+use crate::queries::{KIND_NAV_EXPR, KIND_SIMPLE_IDENT, KIND_THIS_EXPR};
 use crate::resolver::{
     infer::infer_field_chain_type, infer_receiver_type, infer_receiver_type_at, ReceiverKind,
     ReceiverType,
@@ -32,16 +29,6 @@ use crate::types::{CursorPos, FileData, SymbolEntry};
 use crate::StrExt;
 
 const ANDROID_TAG_PREFIXES: &[&str] = &["android.widget.", "android.view.", "android.webkit."];
-
-thread_local! {
-    static XML_NAV_PARSER: RefCell<Parser> = RefCell::new({
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_xml::language_xml())
-            .expect("tree-sitter-xml language");
-        parser
-    });
-}
 
 // ─── Kotlin-side post-resolution remap (definition only) ───────────────────────
 
@@ -465,8 +452,7 @@ pub(crate) fn find_layout_xml_definition(
         return None;
     }
     let current = index.layout_data_for_uri(uri.as_str())?;
-    let content = layout_content_for_uri(index, uri)?;
-    let view_id = view_id_reference_at_position(&content, position)?;
+    let view_id = view_id_at_layout_position(&current, position)?;
     let declarations = index.layouts_declaring_view_id(
         current.module_root.as_path(),
         &current.layout_name,
@@ -485,8 +471,8 @@ pub(crate) fn find_layout_xml_implementation(
     if !is_layout_xml_path(&path) {
         return None;
     }
-    let content = layout_content_for_uri(index, uri)?;
-    let tag_name = element_tag_name_at_position(&content, position)?;
+    let layout_data = index.layout_data_for_uri(uri.as_str())?;
+    let tag_name = element_tag_at_layout_position(&layout_data, position)?;
     if tag_name.contains('.') {
         let mut locations = index.qualified_definition_locations(&tag_name);
         if locations.is_empty() {
@@ -504,95 +490,6 @@ pub(crate) fn find_layout_xml_implementation(
         let locations = index.find_definition_qualified(&qualified, None, uri);
         if !locations.is_empty() {
             return locs_to_opt_response(locations);
-        }
-    }
-    None
-}
-
-fn layout_content_for_uri(index: &impl DocumentAccess, uri: &Url) -> Option<String> {
-    if let Some(lines) = index.mem_lines_for(uri.as_str()) {
-        return Some(lines.join("\n"));
-    }
-    let path = uri.to_file_path().ok()?;
-    std::fs::read_to_string(path).ok()
-}
-
-/// Convert an LSP `Position` (UTF-16 column) into a tree-sitter `Point`
-/// (byte column) for `content`. tree-sitter `Point.column` is a byte offset, so
-/// passing `position.character` unconverted misplaces the cursor on any line
-/// with a multi-byte character before it — matching the Kotlin paths that
-/// already convert via `utf16_col_to_byte`.
-fn xml_point_for_position(content: &str, position: Position) -> tree_sitter::Point {
-    let line_text = content
-        .split('\n')
-        .nth(position.line as usize)
-        .unwrap_or("");
-    tree_sitter::Point {
-        row: position.line as usize,
-        column: utf16_col_to_byte(line_text, position.character as usize),
-    }
-}
-
-fn view_id_reference_at_position(content: &str, position: Position) -> Option<String> {
-    XML_NAV_PARSER.with(|cell| {
-        let tree = cell.borrow_mut().parse(content, None)?;
-        let root = tree.root_node();
-        if root.kind() != KIND_XML_DOCUMENT {
-            return None;
-        }
-        let target_point = xml_point_for_position(content, position);
-        let node = root.descendant_for_point_range(target_point, target_point)?;
-        if node.kind() != KIND_XML_ATT_VALUE {
-            return None;
-        }
-        let bytes = content.as_bytes();
-        let value = node.utf8_text_owned(bytes)?;
-        parse_view_id_reference(&value)
-    })
-}
-
-fn element_tag_name_at_position(content: &str, position: Position) -> Option<String> {
-    XML_NAV_PARSER.with(|cell| {
-        let tree = cell.borrow_mut().parse(content, None)?;
-        let root = tree.root_node();
-        if root.kind() != KIND_XML_DOCUMENT {
-            return None;
-        }
-        let target_point = xml_point_for_position(content, position);
-        let mut node = root.descendant_for_point_range(target_point, target_point)?;
-        let bytes = content.as_bytes();
-        loop {
-            if matches!(node.kind(), KIND_XML_STAG | KIND_XML_EMPTY_ELEM_TAG) {
-                return tag_name_from(node, bytes);
-            }
-            if node.kind() == KIND_XML_ELEMENT {
-                if let Some(start_tag) = node.first_child_of_kind(KIND_XML_STAG) {
-                    return tag_name_from(start_tag, bytes);
-                }
-                if let Some(empty_tag) = node.first_child_of_kind(KIND_XML_EMPTY_ELEM_TAG) {
-                    return tag_name_from(empty_tag, bytes);
-                }
-            }
-            node = node.parent()?;
-        }
-    })
-}
-
-fn tag_name_from(tag_node: Node<'_>, bytes: &[u8]) -> Option<String> {
-    let name_node = tag_node.first_child_of_kind(KIND_XML_NAME)?;
-    name_node.utf8_text_owned(bytes)
-}
-
-fn parse_view_id_reference(value: &str) -> Option<String> {
-    let unquoted = strip_xml_quotes(value);
-    if let Some(id) = unquoted.strip_prefix("@+id/") {
-        if !id.is_empty() {
-            return Some(id.to_string());
-        }
-    }
-    if let Some(id) = unquoted.strip_prefix("@id/") {
-        if !id.is_empty() {
-            return Some(id.to_string());
         }
     }
     None
@@ -1260,11 +1157,10 @@ pub(crate) async fn find_layout_xml_references(
     }
     ensure_layout_side_index_for_uri(index, uri, &path);
     let layout_data = index.layout_data_for_uri(uri.as_str())?;
-    let content = layout_content_for_uri(index, uri)?;
-    let view_id = view_id_reference_at_position(&content, position)?;
+    let view_id = view_id_at_layout_position(&layout_data, position)?;
     let field_name = binding_id_to_field_name(&view_id);
     let expected_class = binding_class_name_for_layout(&layout_data.layout_name);
-    let decl_position = id_attribute_position(&content, &view_id)?;
+    let decl_position = id_attribute_position_for_view_id(&layout_data, &view_id)?;
     log::debug!(
         "viewbinding: layout xml refs view_id={view_id} field={field_name} class={expected_class} layout={}",
         layout_data.layout_name
@@ -1297,27 +1193,6 @@ fn ensure_layout_side_index_for_uri(index: &Indexer, uri: &Url, path: &Path) {
     if let Some(components) = layout_path_components(path) {
         index.ensure_module_layouts_indexed(&components.module_root);
     }
-}
-
-fn id_attribute_position(content: &str, view_id: &str) -> Option<Position> {
-    let needle = format!("@+id/{view_id}");
-    let offset = content
-        .find(&needle)
-        .or_else(|| content.find(&format!("@id/{view_id}")))?;
-    let mut line = 0_u32;
-    let mut character = 0_u32;
-    for (index, character_value) in content.char_indices() {
-        if index == offset {
-            return Some(Position { line, character });
-        }
-        if character_value == '\n' {
-            line += 1;
-            character = 0;
-        } else {
-            character += character_value.len_utf16() as u32;
-        }
-    }
-    None
 }
 
 /// Shared binding-class resolution for staleness diagnostics (PR 6).

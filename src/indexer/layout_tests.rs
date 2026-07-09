@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 
 use super::{
-    build_layout_file_data, is_layout_xml_path, layout_path_components, parse_layout_xml,
+    build_layout_file_data, element_tag_at_layout_position, id_attribute_position_for_view_id,
+    is_layout_xml_path, layout_path_components, parse_layout_xml, view_id_at_layout_position,
     LayoutPathComponents,
 };
 use crate::indexer::cache::{save_cache, try_load_cache, CACHE_VERSION};
@@ -347,4 +348,32 @@ fn ensure_module_layouts_indexed_retries_until_layouts_exist() {
         0,
         "second call is a no-op"
     );
+}
+
+#[test]
+fn layout_position_helpers_use_side_index_ranges() {
+    let parsed = parse_layout_xml(SAMPLE_LAYOUT);
+    let components = LayoutPathComponents {
+        module_root: PathBuf::from("app"),
+        layout_name: "foo_bar".to_string(),
+        variant_qualifier: String::new(),
+    };
+    let layout_data = build_layout_file_data(&components, &parsed).expect("layout data");
+    let title = parsed
+        .view_ids
+        .iter()
+        .find(|view_id| view_id.id == "title")
+        .expect("title");
+
+    let view_id = view_id_at_layout_position(&layout_data, title.id_attribute_range.start)
+        .expect("view id at attribute");
+    assert_eq!(view_id, "title");
+
+    let tag_name =
+        element_tag_at_layout_position(&layout_data, title.tag_range.start).expect("tag name");
+    assert_eq!(tag_name, "TextView");
+
+    let decl_position =
+        id_attribute_position_for_view_id(&layout_data, "title").expect("decl position");
+    assert_eq!(decl_position, title.id_attribute_range.start);
 }

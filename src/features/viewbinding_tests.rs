@@ -1404,10 +1404,21 @@ fn xml_view_id_lookup_maps_utf16_column_to_bytes() {
 </LinearLayout>
 "#;
     let position = utf16_position_in(content, "id/title");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let layout_path = temp.path().join("app/src/main/res/layout/foo_bar.xml");
+    fs::create_dir_all(layout_path.parent().unwrap()).expect("mkdir layout");
+    fs::write(&layout_path, content).expect("write layout");
+    let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
+
+    let indexer = Indexer::new();
+    indexer.index_layout_content(&layout_uri, content);
+    let layout_data = indexer
+        .layout_data_for_uri(layout_uri.as_str())
+        .expect("layout side index");
     assert_eq!(
-        super::view_id_reference_at_position(content, position),
+        crate::indexer::view_id_at_layout_position(&layout_data, position),
         Some("title".to_string()),
-        "UTF-16 column must be converted to a byte column before the tree-sitter lookup"
+        "side-index ranges are UTF-16, so the cursor column must match without re-parsing"
     );
 }
 

@@ -30,6 +30,7 @@ pub(crate) struct TagLocation {
 pub(crate) struct LayoutViewId {
     pub id: String,
     pub tag_name: String,
+    pub tag_range: Range,
     pub id_attribute_range: Range,
 }
 
@@ -56,6 +57,8 @@ pub(crate) struct LayoutFileData {
     pub view_binding_ignore: bool,
     pub view_ids: Vec<LayoutViewId>,
     pub includes: Vec<LayoutInclude>,
+    #[serde(default)]
+    pub element_tags: Vec<TagLocation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +74,7 @@ pub(crate) struct ParsedLayout {
     pub view_binding_ignore: bool,
     pub view_ids: Vec<LayoutViewId>,
     pub includes: Vec<LayoutInclude>,
+    pub element_tags: Vec<TagLocation>,
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -174,23 +178,34 @@ pub(crate) fn parse_layout_xml(content: &str) -> ParsedLayout {
         document_element,
         bytes,
         true,
-        &mut parsed.root_tag,
-        &mut parsed.view_binding_ignore,
-        &mut parsed.view_ids,
-        &mut parsed.includes,
+        LayoutWalkState {
+            root_tag: &mut parsed.root_tag,
+            view_binding_ignore: &mut parsed.view_binding_ignore,
+            view_ids: &mut parsed.view_ids,
+            includes: &mut parsed.includes,
+            element_tags: &mut parsed.element_tags,
+        },
     );
     parsed
 }
 
-fn walk_element(
-    element: Node<'_>,
-    bytes: &[u8],
-    is_root: bool,
-    root_tag: &mut Option<TagLocation>,
-    view_binding_ignore: &mut bool,
-    view_ids: &mut Vec<LayoutViewId>,
-    includes: &mut Vec<LayoutInclude>,
-) {
+#[derive(Debug)]
+struct LayoutWalkState<'a> {
+    root_tag: &'a mut Option<TagLocation>,
+    view_binding_ignore: &'a mut bool,
+    view_ids: &'a mut Vec<LayoutViewId>,
+    includes: &'a mut Vec<LayoutInclude>,
+    element_tags: &'a mut Vec<TagLocation>,
+}
+
+fn walk_element(element: Node<'_>, bytes: &[u8], is_root: bool, state: LayoutWalkState<'_>) {
+    let LayoutWalkState {
+        root_tag,
+        view_binding_ignore,
+        view_ids,
+        includes,
+        element_tags,
+    } = state;
     let Some(tag_node) = element
         .first_child_of_kind(KIND_XML_STAG)
         .or_else(|| element.first_child_of_kind(KIND_XML_EMPTY_ELEM_TAG))
@@ -212,6 +227,11 @@ fn walk_element(
         if attribute_is_true(&attributes, "tools:viewBindingIgnore") {
             *view_binding_ignore = true;
         }
+    } else {
+        element_tags.push(TagLocation {
+            tag_name: tag_name.clone(),
+            range: tag_range,
+        });
     }
 
     if tag_name == "include" {
@@ -244,6 +264,7 @@ fn walk_element(
         view_ids.push(LayoutViewId {
             id: id_reference,
             tag_name,
+            tag_range,
             id_attribute_range,
         });
     }
@@ -258,10 +279,13 @@ fn walk_element(
                 child,
                 bytes,
                 false,
-                root_tag,
-                view_binding_ignore,
-                view_ids,
-                includes,
+                LayoutWalkState {
+                    root_tag,
+                    view_binding_ignore,
+                    view_ids,
+                    includes,
+                    element_tags,
+                },
             );
         }
     }
@@ -375,7 +399,64 @@ pub(crate) fn build_layout_file_data(
         view_binding_ignore: parsed.view_binding_ignore,
         view_ids: parsed.view_ids.clone(),
         includes: parsed.includes.clone(),
+        element_tags: parsed.element_tags.clone(),
     })
+}
+
+fn position_in_layout_range(position: Position, range: Range) -> bool {
+    (position.line > range.start.line
+        || (position.line == range.start.line && position.character >= range.start.character))
+        && (position.line < range.end.line
+            || (position.line == range.end.line && position.character <= range.end.character))
+}
+
+/// Resolve a `@+id/...` reference at `position` from indexed layout metadata.
+pub(crate) fn view_id_at_layout_position(
+    layout_data: &LayoutFileData,
+    position: Position,
+) -> Option<String> {
+    layout_data
+        .view_ids
+        .iter()
+        .find(|view_id| position_in_layout_range(position, view_id.id_attribute_range))
+        .map(|view_id| view_id.id.clone())
+}
+
+/// Resolve an element tag name at `position` from indexed layout metadata.
+pub(crate) fn element_tag_at_layout_position(
+    layout_data: &LayoutFileData,
+    position: Position,
+) -> Option<String> {
+    if position_in_layout_range(position, layout_data.root_tag.range) {
+        return Some(layout_data.root_tag.tag_name.clone());
+    }
+    for include in &layout_data.includes {
+        if position_in_layout_range(position, include.tag_range) {
+            return Some("include".to_string());
+        }
+    }
+    for element_tag in &layout_data.element_tags {
+        if position_in_layout_range(position, element_tag.range) {
+            return Some(element_tag.tag_name.clone());
+        }
+    }
+    layout_data
+        .view_ids
+        .iter()
+        .find(|view_id| position_in_layout_range(position, view_id.tag_range))
+        .map(|view_id| view_id.tag_name.clone())
+}
+
+/// Declaration position for `view_id` from the layout side index.
+pub(crate) fn id_attribute_position_for_view_id(
+    layout_data: &LayoutFileData,
+    view_id: &str,
+) -> Option<Position> {
+    layout_data
+        .view_ids
+        .iter()
+        .find(|entry| entry.id == view_id)
+        .map(|entry| entry.id_attribute_range.start)
 }
 
 /// Collect layout XML paths under `<module_root>/src/*/res*/layout*/` without
