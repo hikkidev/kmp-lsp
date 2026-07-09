@@ -162,8 +162,7 @@ pub(crate) fn view_id_normalized_match(view_id: &str, lookup_id: &str) -> bool {
 
 /// Exact id match first; normalized camelCase/snake_case only when it yields a single candidate.
 pub(crate) fn view_id_matches_lookup(view_id: &str, lookup_id: &str) -> bool {
-    view_id_exact_match(view_id, lookup_id)
-        || view_id_normalized_match(view_id, lookup_id)
+    view_id_exact_match(view_id, lookup_id) || view_id_normalized_match(view_id, lookup_id)
 }
 
 fn snake_case_to_camel_case(name: &str) -> String {
@@ -696,9 +695,10 @@ impl super::Indexer {
                 data.includes
                     .iter()
                     .find(|include| {
-                        include.id.as_deref().is_some_and(|include_id| {
-                            view_id_exact_match(include_id, &lookup_id)
-                        })
+                        include
+                            .id
+                            .as_deref()
+                            .is_some_and(|include_id| view_id_exact_match(include_id, &lookup_id))
                     })
                     .map(|include| (uri.clone(), include.tag_range))
             })
@@ -745,15 +745,14 @@ impl super::Indexer {
             .is_empty()
     }
 
-    /// True when any layout variant for `layout_name` opts out via `tools:viewBindingIgnore`.
-    pub(crate) fn any_layout_variant_ignores_view_binding(
+    /// True when every layout variant for `layout_name` opts out via `tools:viewBindingIgnore`.
+    pub(crate) fn all_layout_variants_ignore_view_binding(
         &self,
         module_root: &Path,
         layout_name: &str,
     ) -> bool {
-        self.matching_layout_entries(module_root, layout_name)
-            .iter()
-            .any(|(_uri, data)| data.view_binding_ignore)
+        let entries = self.matching_layout_entries(module_root, layout_name);
+        !entries.is_empty() && entries.iter().all(|(_uri, data)| data.view_binding_ignore)
     }
 
     /// True when `uri` is a discovered generated binding file (side-index membership).

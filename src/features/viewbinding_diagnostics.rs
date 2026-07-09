@@ -59,7 +59,7 @@ pub(crate) fn viewbinding_import_diagnostics(index: &Indexer, uri: &Url) -> Vec<
             continue;
         }
 
-        let message = if index.any_layout_variant_ignores_view_binding(&module_root, &layout_name) {
+        let message = if index.all_layout_variants_ignore_view_binding(&module_root, &layout_name) {
             "Layout opts out of ViewBinding (`tools:viewBindingIgnore`)".to_string()
         } else if !index.generated_binding_discovered(&module_root, class_name) {
             "ViewBinding class not generated — build the project".to_string()

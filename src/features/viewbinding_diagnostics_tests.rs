@@ -151,6 +151,48 @@ fn import_diagnostic_when_layout_exists_but_no_generated_class() {
 }
 
 #[test]
+fn import_diagnostic_view_binding_ignore_only_when_all_variants_opt_out() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let default_dir = module_root.join("src/main/res/layout");
+    let land_dir = module_root.join("src/main/res/layout-land");
+    fs::create_dir_all(&default_dir).expect("mkdir default");
+    fs::create_dir_all(&land_dir).expect("mkdir land");
+    fs::write(default_dir.join("foo_bar.xml"), FOO_BAR_LAYOUT).expect("write default");
+    fs::write(land_dir.join("foo_bar.xml"), FOO_BAR_LAYOUT_IGNORE).expect("write land ignore");
+
+    let kotlin_path = module_root.join("src/main/kotlin/com/example/MainActivity.kt");
+    fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir kotlin");
+    let kotlin_source = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class MainActivity {
+    fun demo(binding: FooBarBinding) = binding.title
+}
+"#;
+    fs::write(&kotlin_path, kotlin_source).expect("write kotlin");
+
+    let indexer = Arc::new(Indexer::new());
+    let default_uri = Url::from_file_path(default_dir.join("foo_bar.xml")).expect("default uri");
+    let land_uri = Url::from_file_path(land_dir.join("foo_bar.xml")).expect("land uri");
+    let kotlin_uri = Url::from_file_path(&kotlin_path).expect("kotlin uri");
+    indexer.index_layout_content(&default_uri, FOO_BAR_LAYOUT);
+    indexer.index_layout_content(&land_uri, FOO_BAR_LAYOUT_IGNORE);
+    indexer.index_content(&kotlin_uri, kotlin_source);
+
+    let diags = viewbinding_import_diagnostics(&indexer, &kotlin_uri);
+    assert!(
+        diags
+            .iter()
+            .all(|diag| !diag.message.contains("viewBindingIgnore")),
+        "partial variant opt-out must not emit viewBindingIgnore warning: {diags:?}"
+    );
+    assert_eq!(diags.len(), 1);
+    assert!(diags[0].message.contains("ViewBinding class not generated"));
+}
+
+#[test]
 fn import_diagnostic_view_binding_ignore_takes_precedence() {
     let fixture = DiagnosticsFixture::build(FOO_BAR_LAYOUT_IGNORE, false);
     let diags = viewbinding_import_diagnostics(&fixture.indexer, &fixture.kotlin_uri);
