@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::{
     Url,
 };
 
-use crate::indexer::{binding_layout_completion_fields, Indexer};
+use crate::indexer::{binding_layout_completion_fields, is_view_binding_class_name, Indexer};
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
@@ -884,7 +884,7 @@ fn binding_layout_dot_completion_items(
     from_uri: &Url,
     binding_class: &str,
 ) -> Vec<CompletionItem> {
-    if !binding_class.ends_with("Binding") {
+    if !is_view_binding_class_name(binding_class) {
         return Vec::new();
     }
     binding_layout_completion_fields(indexer, from_uri, binding_class)

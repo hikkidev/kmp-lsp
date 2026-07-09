@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dashmap::DashSet;
@@ -119,6 +120,11 @@ pub(crate) fn layout_name_for_binding_class(class_name: &str) -> Option<String> 
         return None;
     }
     Some(pascal_case_to_snake_case(base))
+}
+
+/// True when `class_name` follows AGP ViewBinding naming (`FooBarBinding` → `foo_bar`).
+pub(crate) fn is_view_binding_class_name(class_name: &str) -> bool {
+    layout_name_for_binding_class(class_name).is_some()
 }
 
 fn snake_case_to_pascal_case(name: &str) -> String {
@@ -403,13 +409,23 @@ pub(crate) fn file_imports_trigger_binding_discovery(imports: &[ImportEntry]) ->
 /// Shared registration state for the server-side databinding poll watcher.
 pub(crate) struct DatabindingWatcherState {
     pub(crate) watched_module_roots: Mutex<HashSet<PathBuf>>,
+    pub(crate) cancelled: AtomicBool,
 }
 
 impl DatabindingWatcherState {
     pub(crate) fn new() -> Self {
         Self {
             watched_module_roots: Mutex::new(HashSet::new()),
+            cancelled: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
 
     pub(crate) fn registered_module_roots(&self) -> Vec<PathBuf> {
@@ -437,6 +453,13 @@ impl DatabindingWatcherHandle {
         Self { state: Some(state) }
     }
 
+    /// Stop the poll loop (called on LSP shutdown).
+    pub(crate) fn cancel(&self) {
+        if let Some(state) = &self.state {
+            state.cancel();
+        }
+    }
+
     /// Register `module_root` for polling. Idempotent.
     pub(crate) fn watch_module(&self, module_root: &Path) {
         let Some(state) = &self.state else {
@@ -454,6 +477,7 @@ impl DatabindingWatcherHandle {
 
 struct BindingDiscoveryRequest {
     module_root: PathBuf,
+    databinding_dirs: Option<Vec<PathBuf>>,
 }
 
 /// Cheap handle for enqueueing per-module generated binding discovery.
@@ -473,8 +497,22 @@ impl BindingDiscoveryHandle {
         }
     }
 
+    pub(crate) fn is_noop(&self) -> bool {
+        self.sender.is_none()
+    }
+
     /// Enqueue discovery for `module_root`. Duplicate in-flight requests set a rerun flag.
+    #[allow(dead_code)]
     pub(crate) fn request(&self, module_root: PathBuf) {
+        self.request_with_dirs(module_root, None);
+    }
+
+    /// Enqueue discovery with pre-resolved databinding dirs (watcher hot path).
+    pub(crate) fn request_with_dirs(
+        &self,
+        module_root: PathBuf,
+        databinding_dirs: Option<Vec<PathBuf>>,
+    ) {
         let Some(ref sender) = self.sender else {
             return;
         };
@@ -485,7 +523,10 @@ impl BindingDiscoveryHandle {
         if !self.in_progress.insert(module_root.clone()) {
             return;
         }
-        let _ = sender.send(BindingDiscoveryRequest { module_root });
+        let _ = sender.send(BindingDiscoveryRequest {
+            module_root,
+            databinding_dirs,
+        });
     }
 
     pub(crate) fn clear(&self) {
@@ -509,20 +550,25 @@ pub(crate) fn spawn_binding_discovery_worker(
     tokio::spawn(async move {
         while let Some(request) = receiver.recv().await {
             let module_root = request.module_root;
+            let databinding_dirs = request.databinding_dirs;
             let module_for_blocking = module_root.clone();
             let indexer = Arc::clone(&indexer);
             let in_progress = Arc::clone(&in_progress);
             let rerun_requested = Arc::clone(&rerun_requested);
-            tokio::task::spawn_blocking(move || {
-                indexer.index_generated_bindings(&module_for_blocking, None);
+            let discovery_succeeded = tokio::task::spawn_blocking(move || {
+                indexer.index_generated_bindings(&module_for_blocking, databinding_dirs.as_deref());
             })
             .await
-            .ok();
+            .is_ok();
             in_progress.remove(&module_root);
-            if rerun_requested.remove(&module_root).is_some()
+            if discovery_succeeded
+                && rerun_requested.remove(&module_root).is_some()
                 && in_progress.insert(module_root.clone())
             {
-                let _ = sender.send(BindingDiscoveryRequest { module_root });
+                let _ = sender.send(BindingDiscoveryRequest {
+                    module_root,
+                    databinding_dirs: None,
+                });
             }
         }
     });
@@ -539,8 +585,20 @@ impl super::Indexer {
     }
 
     pub(crate) fn request_generated_binding_discovery(&self, module_root: PathBuf) {
+        self.request_generated_binding_discovery_with_dirs(module_root, None);
+    }
+
+    pub(crate) fn request_generated_binding_discovery_with_dirs(
+        &self,
+        module_root: PathBuf,
+        databinding_dirs: Option<Vec<PathBuf>>,
+    ) {
         if let Ok(handle) = self.binding_discovery.read() {
-            handle.request(module_root);
+            if handle.is_noop() {
+                self.index_generated_bindings(&module_root, databinding_dirs.as_deref());
+                return;
+            }
+            handle.request_with_dirs(module_root, databinding_dirs);
         }
     }
 

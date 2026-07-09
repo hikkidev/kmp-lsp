@@ -6,8 +6,9 @@ use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
 use super::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
-    find_this_context_in_lines, layout_name_for_binding_class, module_root_for_generated_file,
-    module_root_for_source_file, view_id_matches_lookup, Indexer, LayoutFileData, ThisContext,
+    find_this_context_in_lines, is_view_binding_class_name, layout_name_for_binding_class,
+    module_root_for_generated_file, module_root_for_source_file, view_id_matches_lookup, Indexer,
+    LayoutFileData, ThisContext,
 };
 use crate::types::CursorPos;
 
@@ -27,7 +28,7 @@ pub(crate) fn binding_field_type(
     binding_class: &str,
     field_name: &str,
 ) -> Option<String> {
-    if !binding_class.ends_with("Binding") {
+    if !is_view_binding_class_name(binding_class) {
         return None;
     }
     if let Some(module_root) = module_root_for_binding_class(index, source_uri, binding_class) {
@@ -73,7 +74,9 @@ pub(crate) fn infer_bare_binding_field_type(
         uri,
     );
     let binding_class = match this_context {
-        ThisContext::Resolved(resolved_type) if resolved_type.ends_with("Binding") => resolved_type,
+        ThisContext::Resolved(resolved_type) if is_view_binding_class_name(&resolved_type) => {
+            resolved_type
+        }
         ThisContext::Resolved(_) | ThisContext::InsideReceiver | ThisContext::NotFound => {
             return None;
         }

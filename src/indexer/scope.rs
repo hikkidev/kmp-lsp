@@ -7,8 +7,8 @@ use tree_sitter::Point;
 
 use super::{
     find_as_call_arg_type, find_it_element_type_in_lines, find_named_lambda_param_type_in_lines,
-    find_this_context_in_lines, lambda_brace_pos_for_param, line_has_lambda_param, Indexer,
-    ThisContext,
+    find_this_context_in_lines, is_view_binding_class_name, lambda_brace_pos_for_param,
+    line_has_lambda_param, Indexer, ThisContext,
 };
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
@@ -516,7 +516,16 @@ impl Indexer {
     /// its parent sealed class so we can filter out unrelated `Loading` classes
     /// in other sealed hierarchies.
     pub(crate) fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
-        self.enclosing_class_at_impl(uri, row, None)
+        self.enclosing_class_at_with_cache(uri, row, None)
+    }
+
+    pub(crate) fn enclosing_class_at_with_cache(
+        &self,
+        uri: &Url,
+        row: u32,
+        parse_cache: Option<&mut super::RequestParseCache>,
+    ) -> Option<String> {
+        self.enclosing_class_at_impl(uri, row, parse_cache)
     }
 
     fn enclosing_class_at_impl(
@@ -798,7 +807,7 @@ fn infer_type_from_initializer_node(node: tree_sitter::Node<'_>, bytes: &[u8]) -
                 .find(|child| child.kind() == KIND_SIMPLE_IDENT)
         })?;
         let callee_name = callee.utf8_text_owned(bytes)?;
-        if callee_name.ends_with("Binding") && callee_name.starts_with_uppercase() {
+        if is_view_binding_class_name(&callee_name) {
             return Some(callee_name);
         }
         if let Some(inflate_type) = binding_type_from_inflate_call(node, bytes) {
@@ -818,7 +827,7 @@ fn binding_type_from_inflate_call(
     let binding_name = prefix
         .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
         .next()
-        .filter(|name| name.ends_with("Binding") && name.starts_with_uppercase())?;
+        .filter(|name| is_view_binding_class_name(name))?;
     Some(binding_name.to_string())
 }
 

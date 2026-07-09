@@ -1,6 +1,8 @@
 use tower_lsp::lsp_types::{Position, SymbolKind, Url};
 
-use crate::indexer::{binding_field_type, infer_bare_binding_field_type, Indexer};
+use crate::indexer::{
+    binding_field_type, infer_bare_binding_field_type, is_view_binding_class_name, Indexer,
+};
 use crate::types::FileData;
 use crate::LinesExt;
 use crate::StrExt;
@@ -569,7 +571,7 @@ pub(crate) fn find_field_type_in_class(
     class_name: &str,
     field_name: &str,
 ) -> Option<String> {
-    if class_name.ends_with("Binding") {
+    if is_view_binding_class_name(class_name) {
         if let Some(field_type) = binding_field_type(indexer, None, class_name, field_name) {
             return Some(field_type);
         }
@@ -610,7 +612,7 @@ pub(crate) fn find_field_type_in_class_from(
     field_name: &str,
     from_uri: &Url,
 ) -> Option<String> {
-    if class_name.ends_with("Binding") {
+    if is_view_binding_class_name(class_name) {
         if let Some(field_type) =
             binding_field_type(indexer, Some(from_uri), class_name, field_name)
         {

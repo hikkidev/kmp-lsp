@@ -68,14 +68,15 @@ mod discover;
 mod layout;
 pub(crate) use self::layout::{
     element_tag_at_layout_position, id_attribute_position_for_view_id, is_layout_xml_path,
-    layout_path_components, view_id_at_layout_position, LayoutCacheEntry, LayoutFileData,
+    layout_path_components, spawn_layout_indexing_worker, view_id_at_layout_position,
+    LayoutCacheEntry, LayoutFileData, LayoutIndexingHandle,
 };
 
 mod binding_discovery;
 pub(crate) use self::binding_discovery::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_id_to_field_name,
     discover_databinding_dirs, import_triggers_binding_discovery,
-    is_generated_binding_watcher_path, layout_name_for_binding_class,
+    is_generated_binding_watcher_path, is_view_binding_class_name, layout_name_for_binding_class,
     module_root_for_generated_file, module_root_for_source_file, spawn_binding_discovery_worker,
     view_id_matches_lookup, BindingDiscoveryHandle, DatabindingWatcherHandle,
     DatabindingWatcherState, GeneratedBindingClassLocation, ModuleBindings,
@@ -339,6 +340,8 @@ pub(crate) struct Indexer {
     pub(crate) binding_discovery: std::sync::RwLock<BindingDiscoveryHandle>,
     /// Handle for registering module roots with the server-side databinding poll watcher.
     pub(crate) databinding_watcher: std::sync::RwLock<DatabindingWatcherHandle>,
+    /// Handle for enqueueing background layout XML indexing.
+    pub(crate) layout_indexing: std::sync::RwLock<LayoutIndexingHandle>,
 }
 
 /// Cap on how many same-named definitions a receiver-less by-name inference lookup
@@ -622,6 +625,7 @@ impl Indexer {
             layouts_indexed_modules: DashSet::new(),
             binding_discovery: std::sync::RwLock::new(BindingDiscoveryHandle::noop()),
             databinding_watcher: std::sync::RwLock::new(DatabindingWatcherHandle::noop()),
+            layout_indexing: std::sync::RwLock::new(LayoutIndexingHandle::noop()),
         }
     }
 
@@ -746,6 +750,9 @@ impl Indexer {
         self.layouts_by_module_and_name.clear();
         self.layouts_indexed_modules.clear();
         if let Ok(handle) = self.binding_discovery.read() {
+            handle.clear();
+        }
+        if let Ok(handle) = self.layout_indexing.read() {
             handle.clear();
         }
         // Clear enrichment dedup so symbols are re-attempted after reindex.
