@@ -95,7 +95,10 @@ fn snapshot_differs_from_index(
     current_snapshot: &HashMap<String, BindingFileSnapshot>,
 ) -> bool {
     if current_snapshot.is_empty() {
-        return false;
+        return indexer
+            .generated_bindings
+            .get(module_root)
+            .is_some_and(|module_bindings| !module_bindings.entries.is_empty());
     }
     match indexer.generated_bindings.get(module_root) {
         Some(module_bindings) => {
@@ -107,6 +110,12 @@ fn snapshot_differs_from_index(
                     return true;
                 };
                 if snapshot.modified_at_secs != entry.modified_at_secs {
+                    return true;
+                }
+                if snapshot.modified_at_nanos != entry.modified_at_nanos {
+                    return true;
+                }
+                if snapshot.file_size != entry.file_size {
                     return true;
                 }
             }

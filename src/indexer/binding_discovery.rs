@@ -24,6 +24,12 @@ pub(crate) struct GeneratedBindingEntry {
     pub file_uri: String,
     /// File mtime (seconds since Unix epoch) when the entry was discovered.
     pub modified_at_secs: u64,
+    /// Sub-second mtime component for finer change detection.
+    #[serde(default)]
+    pub modified_at_nanos: u32,
+    /// File size in bytes when the entry was discovered.
+    #[serde(default)]
+    pub file_size: u64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -187,21 +193,45 @@ fn is_databinding_package(package_name: &str) -> bool {
     package_name.ends_with(".databinding")
 }
 
-fn read_binding_java_metadata(path: &Path) -> Option<(String, String, u64)> {
+fn read_binding_java_metadata(path: &Path) -> Option<(String, String, u64, u32, u64)> {
     let content = std::fs::read_to_string(path).ok()?;
     let package_name = package_from_java_source(&content)?;
     if !is_databinding_package(&package_name) {
         return None;
     }
     let class_name = path.file_stem()?.to_str()?.to_string();
-    let modified_at_secs = std::fs::metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok();
+    let modified_at_secs = modified
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let modified_at_nanos = modified
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0);
+    let file_size = metadata.len();
     let file_uri = Url::from_file_path(path).ok()?.to_string();
-    Some((class_name, file_uri, modified_at_secs))
+    Some((
+        class_name,
+        file_uri,
+        modified_at_secs,
+        modified_at_nanos,
+        file_size,
+    ))
+}
+
+fn binding_entry_is_newer_or_equal(
+    existing: &GeneratedBindingEntry,
+    candidate: &GeneratedBindingEntry,
+) -> bool {
+    if existing.modified_at_secs != candidate.modified_at_secs {
+        return existing.modified_at_secs > candidate.modified_at_secs;
+    }
+    if existing.modified_at_nanos != candidate.modified_at_nanos {
+        return existing.modified_at_nanos > candidate.modified_at_nanos;
+    }
+    existing.file_size >= candidate.file_size
 }
 
 // ─── Discovery ────────────────────────────────────────────────────────────────
@@ -226,7 +256,8 @@ pub(crate) fn discover_generated_bindings(module_root: &Path) -> Vec<GeneratedBi
         if !path.is_file() || !is_binding_java_filename(path) {
             continue;
         }
-        let Some((class_name, file_uri, modified_at_secs)) = read_binding_java_metadata(path)
+        let Some((class_name, file_uri, modified_at_secs, modified_at_nanos, file_size)) =
+            read_binding_java_metadata(path)
         else {
             continue;
         };
@@ -234,9 +265,11 @@ pub(crate) fn discover_generated_bindings(module_root: &Path) -> Vec<GeneratedBi
             class_name: class_name.clone(),
             file_uri,
             modified_at_secs,
+            modified_at_nanos,
+            file_size,
         };
         match by_class_name.get(&class_name) {
-            Some(existing) if existing.modified_at_secs >= modified_at_secs => {}
+            Some(existing) if binding_entry_is_newer_or_equal(existing, &candidate) => {}
             _ => {
                 by_class_name.insert(class_name, candidate);
             }
@@ -703,7 +736,19 @@ impl super::Indexer {
                     .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|duration| duration.as_secs())
                     .unwrap_or(0);
-                if current_mtime != entry.modified_at_secs {
+                let current_nanos = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.subsec_nanos())
+                    .unwrap_or(0);
+                let current_size = std::fs::metadata(&path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                if current_mtime != entry.modified_at_secs
+                    || current_nanos != entry.modified_at_nanos
+                    || current_size != entry.file_size
+                {
                     needs_rediscovery = true;
                 }
                 fresh_entries.insert(class_name.clone(), entry.clone());
