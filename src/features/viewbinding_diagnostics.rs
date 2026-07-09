@@ -17,10 +17,10 @@ use crate::queries::{
 use crate::Language;
 use crate::StrExt;
 
-use super::viewbinding::{
+use super::binding_receiver::{
     binding_class_for_bare_field_access, binding_class_for_field_access,
-    view_id_live_for_binding_field,
 };
+use super::viewbinding::view_id_live_for_binding_field;
 
 const DIAGNOSTIC_SOURCE: &str = "kmp-lsp";
 

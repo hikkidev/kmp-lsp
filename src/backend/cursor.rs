@@ -11,9 +11,11 @@
 
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::indexer::{find_this_context_in_lines, Indexer, RequestParseCache, ThisContext};
+use crate::features::binding_receiver::{
+    bare_member_exists_on_binding_receiver, implicit_receiver_type_for_bare_member_at,
+};
+use crate::indexer::{Indexer, RequestParseCache};
 use crate::resolver::{infer_receiver_type, infer_receiver_type_at, ReceiverKind, ReceiverType};
-use crate::types::CursorPos;
 
 /// Cursor context for identifier-based LSP features (hover, goto-def, completion).
 ///
@@ -79,7 +81,7 @@ impl CursorContext {
                 .next()
                 .is_some_and(|character| character.is_lowercase())
         {
-            implicit_receiver_type_for_bare_member(indexer, uri, line, col, &word, parse_cache)
+            implicit_receiver_type_for_bare_member_at(indexer, uri, line, col, &word, parse_cache)
         } else {
             None
         };
@@ -88,7 +90,7 @@ impl CursorContext {
 
         let mut qualifier = qualifier;
         let contextual = if let Some(receiver_type) = implicit_this_receiver {
-            if bare_member_exists_on_receiver(indexer, uri, &receiver_type, &word) {
+            if bare_member_exists_on_binding_receiver(indexer, uri, &receiver_type, &word) {
                 qualifier = Some("this".to_string());
                 Some(receiver_type)
             } else {
@@ -130,64 +132,4 @@ impl CursorContext {
             lambda_decl,
         })
     }
-}
-
-/// Bare member access inside a receiver lambda (`with(binding) { title }`,
-/// `binding.apply { title }`) uses implicit `this` — same as explicit `this.title`.
-///
-/// A nearer local declaration (val/var/param/lambda param) named `word` shadows
-/// the implicit receiver member, so bail out in that case: Kotlin would resolve
-/// the bare name to the local, not to `this.word`.
-fn implicit_receiver_type_for_bare_member(
-    indexer: &Indexer,
-    uri: &Url,
-    line: usize,
-    col: usize,
-    word: &str,
-    parse_cache: Option<&mut RequestParseCache>,
-) -> Option<ReceiverType> {
-    if indexer.name_shadowed_by_local_declaration_with_cache(uri, line, col, word, parse_cache) {
-        return None;
-    }
-    let lines = indexer.mem_lines_for(uri.as_str())?;
-    let this_context = find_this_context_in_lines(
-        &lines,
-        CursorPos {
-            line,
-            utf16_col: col,
-        },
-        indexer,
-        uri,
-    );
-    match this_context {
-        ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
-        ThisContext::InsideReceiver | ThisContext::NotFound => None,
-    }
-}
-
-fn bare_member_exists_on_receiver(
-    indexer: &Indexer,
-    uri: &Url,
-    receiver_type: &ReceiverType,
-    member_name: &str,
-) -> bool {
-    if !member_name
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_lowercase())
-    {
-        return false;
-    }
-    let binding_class = receiver_type.leaf.as_str();
-    if binding_class.ends_with("Binding") {
-        return crate::indexer::binding_field_type(indexer, Some(uri), binding_class, member_name)
-            .is_some();
-    }
-    crate::resolver::infer::find_field_type_in_class_from(
-        indexer,
-        &receiver_type.leaf,
-        member_name,
-        uri,
-    )
-    .is_some()
 }
