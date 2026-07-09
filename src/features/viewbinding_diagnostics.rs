@@ -109,6 +109,9 @@ pub(crate) fn stale_binding_field_diagnostics(
     if !matches!(Language::from_path(uri.path()), Language::Kotlin) {
         return Vec::new();
     }
+    if !module_has_binding_staleness_context(index, uri) {
+        return Vec::new();
+    }
 
     let bytes = &document.bytes;
     let mut diagnostics = Vec::new();
@@ -281,6 +284,30 @@ fn binding_field_exists(
                 symbol.kind,
                 SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
             )
+    })
+}
+
+/// Skip staleness work when the module has no generated bindings and no databinding import.
+fn module_has_binding_staleness_context(index: &Indexer, uri: &Url) -> bool {
+    let Some(module_root) = uri
+        .to_file_path()
+        .ok()
+        .and_then(|path| module_root_for_source_file(&path))
+    else {
+        return false;
+    };
+    if index
+        .generated_bindings
+        .get(&module_root)
+        .is_some_and(|module| !module.entries.is_empty())
+    {
+        return true;
+    }
+    index.file_data_for(uri.as_str()).is_some_and(|file_data| {
+        file_data
+            .imports
+            .iter()
+            .any(|import| !import.is_star && import_triggers_binding_discovery(&import.full_path))
     })
 }
 

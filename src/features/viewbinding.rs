@@ -11,13 +11,16 @@ use crate::backend::format::format_contextual_hover;
 use crate::features::definition::locs_to_opt_response;
 use crate::features::references::find_references_with_qualifier;
 use crate::features::traits::{DocumentAccess, SymbolIndex};
-use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte};
+use crate::indexer::live_tree::{
+    lang_for_path, parse_live, request_parse_cache_get, request_parse_cache_insert,
+    utf16_col_to_byte,
+};
 use crate::indexer::NodeExt;
 use crate::indexer::{
     binding_class_name_for_layout, binding_field_name_to_id, binding_field_type,
     binding_id_to_field_name, find_this_context_in_lines, is_layout_xml_path,
     layout_name_for_binding_class, layout_path_components, module_root_for_generated_file,
-    module_root_for_source_file, IndexRead, Indexer, ThisContext,
+    module_root_for_source_file, strip_xml_quotes, IndexRead, Indexer, ThisContext,
 };
 use crate::inlay_hints::{line_starts, ts_byte_col_to_utf16};
 use crate::queries::{
@@ -50,7 +53,7 @@ pub(crate) fn remap_generated_binding_definitions<I: IndexRead>(
     index: &I,
     locations: Vec<Location>,
 ) -> Vec<Location> {
-    log::info!(
+    log::debug!(
         "viewbinding: remap_generated_binding_definitions pre_remap_count={}",
         locations.len()
     );
@@ -61,14 +64,14 @@ pub(crate) fn remap_generated_binding_definitions<I: IndexRead>(
             continue;
         }
         let Some(targets) = remap_single_binding_location(index, &location) else {
-            log::info!(
+            log::debug!(
                 "viewbinding: remap miss, keeping generated Java fallback uri={}",
                 location.uri
             );
             remapped.push(location);
             continue;
         };
-        log::info!(
+        log::debug!(
             "viewbinding: remap hit uri={} target_count={}",
             location.uri,
             targets.len()
@@ -124,7 +127,7 @@ fn remap_binding_class<I: IndexRead>(
     let mut entries = index.layout_uris_for_binding_class(&symbol.name, module_root);
     if entries.is_empty() {
         let on_demand = index.ensure_module_layouts_indexed(module_root);
-        log::info!(
+        log::debug!(
             "viewbinding: remap_binding_class class={} module={} on_demand_indexed={}",
             symbol.name,
             module_root.display(),
@@ -133,7 +136,7 @@ fn remap_binding_class<I: IndexRead>(
         entries = index.layout_uris_for_binding_class(&symbol.name, module_root);
     }
     if entries.is_empty() {
-        log::info!(
+        log::debug!(
             "viewbinding: remap_binding_class no layouts for class={} module={}",
             symbol.name,
             module_root.display()
@@ -178,7 +181,7 @@ fn remap_binding_field<I: IndexRead>(
     let view_id = binding_field_name_to_id(&symbol.name);
     let id_targets = index.layouts_declaring_view_id(module_root, &layout_name, &view_id);
     if id_targets.is_empty() {
-        log::info!(
+        log::debug!(
             "viewbinding: remap_binding_field no @+id for field={} layout={} module={}",
             symbol.name,
             layout_name,
@@ -279,6 +282,76 @@ fn position_in_range(position: Position, range: Range) -> bool {
 
 // ─── Binding-type implementation (Kotlin) ────────────────────────────────────
 
+/// True when `field_name` is declared in the generated Java binding class.
+pub(crate) fn binding_field_in_generated_java(
+    index: &Indexer,
+    expected_binding_class: &str,
+    field_name: &str,
+    source_uri: &Url,
+) -> bool {
+    let Some(path) = source_uri.to_file_path().ok() else {
+        return false;
+    };
+    let Some(module_root) = module_root_for_source_file(&path) else {
+        return false;
+    };
+    let Some(module) = index.generated_bindings.get(&module_root) else {
+        return false;
+    };
+    let Some(entry) = module.entries.get(expected_binding_class) else {
+        return false;
+    };
+    let Some(file_data) = index.file_data_for(&entry.file_uri) else {
+        return false;
+    };
+    file_data.symbols.iter().any(|symbol| {
+        symbol.name == field_name
+            && matches!(
+                symbol.kind,
+                SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+            )
+    })
+}
+
+/// True when `field_name` maps to a live `@+id` or `<include>` in `layout_name`.
+pub(crate) fn binding_field_in_live_layout_by_name(
+    index: &Indexer,
+    module_root: &Path,
+    layout_name: &str,
+    field_name: &str,
+) -> bool {
+    index.ensure_module_layouts_indexed(module_root);
+    if !index
+        .include_tag_for_field(module_root, layout_name, field_name)
+        .is_empty()
+    {
+        return true;
+    }
+    let view_id = binding_field_name_to_id(field_name);
+    !index
+        .layouts_declaring_view_id(module_root, layout_name, &view_id)
+        .is_empty()
+}
+
+/// True when `field_name` maps to a live `@+id` or `<include>` in the paired layout.
+pub(crate) fn binding_field_in_live_layout(
+    index: &Indexer,
+    expected_binding_class: &str,
+    field_name: &str,
+    source_uri: &Url,
+) -> bool {
+    let Some(path) = source_uri.to_file_path().ok() else {
+        return false;
+    };
+    let Some(module_root) = module_root_for_source_file(&path) else {
+        return false;
+    };
+    let Some(layout_name) = layout_name_for_binding_class(expected_binding_class) else {
+        return false;
+    };
+    binding_field_in_live_layout_by_name(index, &module_root, &layout_name, field_name)
+}
+
 /// Return the raw generated Java class for a `*Binding` type usage — no remap.
 pub(crate) fn find_binding_implementation(
     index: &(impl SymbolIndex + IndexRead),
@@ -291,9 +364,27 @@ pub(crate) fn find_binding_implementation(
     }
     let locations = index.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
     let binding_locations: Vec<Location> = locations
-        .into_iter()
+        .iter()
         .filter(|location| index.is_generated_binding_uri(location.uri.as_str()))
+        .cloned()
         .collect();
+    if !binding_locations.is_empty() {
+        return locs_to_opt_response(binding_locations);
+    }
+    let has_competing_workspace_class = locations.iter().any(|location| {
+        !index.is_generated_binding_uri(location.uri.as_str())
+            && index
+                .get_file_data(location.uri.as_str())
+                .is_some_and(|file_data| {
+                    file_data
+                        .symbols
+                        .iter()
+                        .any(|symbol| symbol.name == ctx.word)
+                })
+    });
+    if has_competing_workspace_class {
+        return None;
+    }
     locs_to_opt_response(binding_locations)
 }
 
@@ -311,7 +402,7 @@ pub(crate) fn find_binding_field_definition(
     let path = uri.to_file_path().ok()?;
     let module_root = module_root_for_source_file(&path)?;
     let layout_name = layout_name_for_binding_class(&expected_class)?;
-    log::info!(
+    log::debug!(
         "viewbinding: find_binding_field_definition field={} qualifier={:?} class={} module={}",
         ctx.word,
         ctx.qualifier,
@@ -460,8 +551,7 @@ fn tag_name_from(tag_node: Node<'_>, bytes: &[u8]) -> Option<String> {
 }
 
 fn parse_view_id_reference(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    let unquoted = strip_xml_quotes(trimmed);
+    let unquoted = strip_xml_quotes(value);
     if let Some(id) = unquoted.strip_prefix("@+id/") {
         if !id.is_empty() {
             return Some(id.to_string());
@@ -473,16 +563,6 @@ fn parse_view_id_reference(value: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn strip_xml_quotes(value: &str) -> &str {
-    if (value.starts_with('"') && value.ends_with('"'))
-        || (value.starts_with('\'') && value.ends_with('\''))
-    {
-        &value[1..value.len() - 1]
-    } else {
-        value
-    }
 }
 
 pub(crate) use crate::indexer::{java_field_type_from_detail, short_type_name};
@@ -786,7 +866,7 @@ pub(crate) async fn find_binding_field_references(
             verify_binding_field_reference(index, location, field_name, expected_binding_class)
         })
         .collect();
-    log::info!(
+    log::debug!(
         "viewbinding: binding field refs class={} field={} candidates={} verified={}",
         expected_binding_class,
         field_name,
@@ -805,9 +885,14 @@ fn verify_binding_field_reference(
     let Some((tree, bytes)) = live_or_disk_tree(index, &location.uri) else {
         return false;
     };
-    let receiver_type = if let Some(navigation_node) =
-        navigation_expression_at_position(&tree, &bytes, location.range.start, field_name)
-    {
+    let receiver_type = if let Some(navigation_node) = navigation_expression_at_position(
+        index,
+        &tree,
+        &bytes,
+        &location.uri,
+        location.range.start,
+        field_name,
+    ) {
         infer_receiver_for_navigation(index, &navigation_node, &bytes, &location.uri)
     } else {
         implicit_receiver_type_for_bare_field(index, &tree, &bytes, location, field_name)
@@ -826,74 +911,129 @@ fn implicit_receiver_type_for_bare_field(
     field_name: &str,
 ) -> Option<ReceiverType> {
     let root = tree.root_node();
-    let target_point = tree_sitter::Point {
-        row: location.range.start.line as usize,
-        column: location.range.start.character as usize,
-    };
-    let node = root.descendant_for_point_range(target_point, target_point)?;
-    if node.kind() != KIND_SIMPLE_IDENT {
-        return None;
+    let line_text = index
+        .mem_lines_for(location.uri.as_str())
+        .or_else(|| {
+            index
+                .files
+                .get(location.uri.as_str())
+                .map(|file_data| file_data.lines.clone())
+        })
+        .and_then(|lines| lines.get(location.range.start.line as usize).cloned())
+        .unwrap_or_default();
+    for byte_column in
+        reference_byte_column_candidates(&line_text, location.range.start.character as usize)
+    {
+        let target_point = tree_sitter::Point {
+            row: location.range.start.line as usize,
+            column: byte_column,
+        };
+        let node = root.descendant_for_point_range(target_point, target_point)?;
+        if node.kind() != KIND_SIMPLE_IDENT {
+            continue;
+        }
+        if node.utf8_text_owned(bytes).as_deref() != Some(field_name) {
+            continue;
+        }
+        // A local val/var/param named `field_name` shadows the binding member, so a
+        // bare usage here is not a binding-field reference.
+        if index.name_shadowed_by_local_declaration(
+            &location.uri,
+            location.range.start.line as usize,
+            location.range.start.character as usize,
+            field_name,
+        ) {
+            return None;
+        }
+        let lines = index.mem_lines_for(location.uri.as_str()).or_else(|| {
+            index
+                .files
+                .get(location.uri.as_str())
+                .map(|file_data| file_data.lines.clone())
+        })?;
+        let this_context = find_this_context_in_lines(
+            lines.as_ref(),
+            CursorPos {
+                line: location.range.start.line as usize,
+                utf16_col: location.range.start.character as usize,
+            },
+            index,
+            &location.uri,
+        );
+        return match this_context {
+            ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
+            ThisContext::InsideReceiver | ThisContext::NotFound => None,
+        };
     }
-    if node.utf8_text_owned(bytes).as_deref() != Some(field_name) {
-        return None;
-    }
-    // A local val/var/param named `field_name` shadows the binding member, so a
-    // bare usage here is not a binding-field reference.
-    if index.name_shadowed_by_local_declaration(
-        &location.uri,
-        location.range.start.line as usize,
-        location.range.start.character as usize,
-        field_name,
-    ) {
-        return None;
-    }
-    let lines = index.mem_lines_for(location.uri.as_str())?;
-    let this_context = find_this_context_in_lines(
-        &lines,
-        CursorPos {
-            line: location.range.start.line as usize,
-            utf16_col: location.range.start.character as usize,
-        },
-        index,
-        &location.uri,
-    );
-    match this_context {
-        ThisContext::Resolved(resolved_type) => Some(ReceiverType::from_raw(resolved_type)),
-        ThisContext::InsideReceiver | ThisContext::NotFound => None,
-    }
+    None
 }
 
 fn live_or_disk_tree(index: &Indexer, uri: &Url) -> Option<(Tree, Vec<u8>)> {
     if let Some(document) = index.live_doc(uri) {
         return Some((document.tree.clone(), document.bytes.clone()));
     }
+    if let Some(document) = request_parse_cache_get(uri.as_str()) {
+        return Some((document.tree.clone(), document.bytes.clone()));
+    }
     let path = uri.to_file_path().ok()?;
     let content = std::fs::read_to_string(path).ok()?;
     let language = lang_for_path(uri.path())?;
     let document = parse_live(&content, language)?;
-    Some((document.tree, document.bytes))
+    let document = std::sync::Arc::new(document);
+    request_parse_cache_insert(uri.to_string(), std::sync::Arc::clone(&document));
+    Some((document.tree.clone(), document.bytes.clone()))
 }
 
 fn navigation_expression_at_position<'tree>(
+    index: &Indexer,
     tree: &'tree Tree,
     bytes: &[u8],
+    uri: &Url,
     position: Position,
     field_name: &str,
 ) -> Option<Node<'tree>> {
     let root = tree.root_node();
-    let target_point = tree_sitter::Point {
-        row: position.line as usize,
-        column: position.character as usize,
-    };
-    let mut node = root.descendant_for_point_range(target_point, target_point)?;
-    loop {
-        if node.kind() == KIND_NAV_EXPR
-            && navigation_member_name(&node, bytes)?.as_str() == field_name
-        {
-            return Some(node);
+    let line_text = index
+        .mem_lines_for(uri.as_str())
+        .or_else(|| {
+            index
+                .files
+                .get(uri.as_str())
+                .map(|file_data| file_data.lines.clone())
+        })
+        .and_then(|lines| lines.get(position.line as usize).cloned())
+        .unwrap_or_default();
+    for byte_column in reference_byte_column_candidates(&line_text, position.character as usize) {
+        let target_point = tree_sitter::Point {
+            row: position.line as usize,
+            column: byte_column,
+        };
+        let Some(mut node) = root.descendant_for_point_range(target_point, target_point) else {
+            continue;
+        };
+        loop {
+            if node.kind() == KIND_NAV_EXPR
+                && navigation_member_name(&node, bytes).as_deref() == Some(field_name)
+            {
+                return Some(node);
+            }
+            node = node.parent()?;
         }
-        node = node.parent()?;
     }
+    None
+}
+
+/// Reference locations may carry UTF-16 columns (index scan) or byte columns (rg).
+fn reference_byte_column_candidates(line_text: &str, character: usize) -> Vec<usize> {
+    let utf16_byte = utf16_col_to_byte(line_text, character);
+    let mut candidates = vec![utf16_byte];
+    if character <= line_text.len()
+        && line_text.is_char_boundary(character)
+        && character != utf16_byte
+    {
+        candidates.push(character);
+    }
+    candidates
 }
 
 fn navigation_member_name(navigation_node: &Node<'_>, bytes: &[u8]) -> Option<String> {
@@ -1033,7 +1173,7 @@ pub(crate) async fn find_layout_xml_references(
     let field_name = binding_id_to_field_name(&view_id);
     let expected_class = binding_class_name_for_layout(&layout_data.layout_name);
     let decl_position = id_attribute_position(&content, &view_id)?;
-    log::info!(
+    log::debug!(
         "viewbinding: layout xml refs view_id={view_id} field={field_name} class={expected_class} layout={}",
         layout_data.layout_name
     );
@@ -1047,7 +1187,7 @@ pub(crate) async fn find_layout_xml_references(
     )
     .await;
     if locations.is_empty() {
-        log::info!(
+        log::debug!(
             "viewbinding: layout xml refs resolved nothing for view_id={view_id} class={expected_class}"
         );
     }
@@ -1058,7 +1198,7 @@ fn ensure_layout_side_index_for_uri(index: &Indexer, uri: &Url, path: &Path) {
     if index.layout_data_for_uri(uri.as_str()).is_none() {
         if let Ok(content) = std::fs::read_to_string(path) {
             index.index_layout_content(uri, &content);
-            log::info!("viewbinding: on-demand indexed layout uri={uri}");
+            log::debug!("viewbinding: on-demand indexed layout uri={uri}");
         }
     }
     if let Some(components) = layout_path_components(path) {
@@ -1140,16 +1280,7 @@ pub(crate) fn view_id_live_for_binding_field(
     layout_name: &str,
     field_name: &str,
 ) -> bool {
-    let view_id = binding_field_name_to_id(field_name);
-    if !index
-        .layouts_declaring_view_id(module_root, layout_name, &view_id)
-        .is_empty()
-    {
-        return true;
-    }
-    !index
-        .include_tag_for_field(module_root, layout_name, field_name)
-        .is_empty()
+    binding_field_in_live_layout_by_name(index, module_root, layout_name, field_name)
 }
 
 #[cfg(test)]

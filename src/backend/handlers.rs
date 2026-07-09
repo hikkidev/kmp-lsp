@@ -81,7 +81,15 @@ impl Backend {
             position,
             &ctx,
         ) {
-            if !ctx.word.starts_with_uppercase() {
+            if !ctx.word.starts_with_uppercase()
+                && crate::features::viewbinding::binding_field_in_generated_java(
+                    &self.indexer,
+                    &expected_class,
+                    &ctx.word,
+                    uri,
+                )
+            {
+                let _parse_cache = crate::indexer::RequestParseCacheGuard::new();
                 let locations = crate::features::viewbinding::find_binding_field_references(
                     &self.indexer,
                     &expected_class,

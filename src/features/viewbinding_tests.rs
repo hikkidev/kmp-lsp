@@ -11,10 +11,11 @@ use crate::features::definition::find_definition;
 use crate::features::hover::compute_hover;
 use crate::features::implementation::find_implementation;
 use crate::features::viewbinding::{
-    binding_field_hover_for_class, find_binding_field_definition, find_binding_field_references,
-    find_binding_implementation, find_layout_xml_definition, find_layout_xml_implementation,
-    find_layout_xml_references, format_binding_field_hover, java_field_type_from_detail,
-    remap_generated_binding_definitions, resolve_expected_binding_class, short_type_name,
+    binding_field_hover_for_class, binding_field_in_generated_java, binding_field_in_live_layout,
+    find_binding_field_definition, find_binding_field_references, find_binding_implementation,
+    find_layout_xml_definition, find_layout_xml_implementation, find_layout_xml_references,
+    format_binding_field_hover, java_field_type_from_detail, remap_generated_binding_definitions,
+    resolve_expected_binding_class, short_type_name,
 };
 use crate::indexer::{binding_field_name_to_id, binding_id_to_field_name, Indexer};
 use crate::parser::nullable_at_line;
@@ -494,6 +495,90 @@ fun use(competitor: Competitor) {
     assert!(references
         .iter()
         .all(|location| !location.uri.as_str().contains("Competitor.kt")));
+}
+
+#[tokio::test]
+async fn binding_field_references_still_verify_when_id_removed_from_layout() {
+    let fixture = ViewBindingFixture::build();
+    let stale_layout = r#"<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <include
+        android:id="@+id/header"
+        layout="@layout/view_header" />
+</LinearLayout>
+"#;
+    let default_layout_path = fixture.module_root.join("src/main/res/layout/foo_bar.xml");
+    fs::write(&default_layout_path, stale_layout).expect("write stale layout");
+    let default_layout_uri = Url::from_file_path(&default_layout_path).expect("layout uri");
+    fixture
+        .indexer
+        .index_layout_content(&default_layout_uri, stale_layout);
+
+    assert!(
+        !binding_field_in_live_layout(
+            &fixture.indexer,
+            "FooBarBinding",
+            "subtitle",
+            &fixture.kotlin_uri,
+        ),
+        "subtitle id removed from layout"
+    );
+    assert!(
+        binding_field_in_generated_java(
+            &fixture.indexer,
+            "FooBarBinding",
+            "subtitle",
+            &fixture.kotlin_uri,
+        ),
+        "subtitle still in generated Java"
+    );
+
+    let kotlin_with_stale_field = r#"package com.example
+
+import com.example.app.databinding.FooBarBinding
+
+class StaleFieldUsage {
+    fun demo(binding: FooBarBinding) {
+        binding.subtitle
+    }
+}
+"#;
+    let stale_usage_path = fixture
+        .module_root
+        .join("src/main/kotlin/com/example/StaleFieldUsage.kt");
+    fs::create_dir_all(stale_usage_path.parent().unwrap()).expect("mkdir");
+    fs::write(&stale_usage_path, kotlin_with_stale_field).expect("write stale usage");
+    let stale_usage_uri = Url::from_file_path(&stale_usage_path).expect("stale usage uri");
+    fixture
+        .indexer
+        .index_content(&stale_usage_uri, kotlin_with_stale_field);
+
+    let position = ViewBindingFixture::position_in(kotlin_with_stale_field, "binding.subtitle");
+    let references = find_binding_field_references(
+        &fixture.indexer,
+        "FooBarBinding",
+        "subtitle",
+        &stale_usage_uri,
+        position.line,
+        false,
+    )
+    .await;
+    assert!(
+        !references.is_empty(),
+        "references must still be receiver-verified when field is stale in layout but present in Java"
+    );
+    assert!(references.iter().any(|location| {
+        location.uri.as_str().contains("StaleFieldUsage.kt")
+            && location.range.start.line == position.line
+    }));
 }
 
 #[tokio::test]
