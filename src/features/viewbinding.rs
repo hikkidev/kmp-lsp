@@ -85,35 +85,70 @@ fn remap_single_binding_location<I: IndexRead>(
     let path = location.uri.to_file_path().ok()?;
     let module_root = module_root_for_generated_file(&path)?;
     let file_data = index.get_file_data(location.uri.as_str())?;
-    let symbol = symbol_at_location(&file_data, location).or_else(|| {
-        file_data
-            .symbols
-            .iter()
-            .find(|symbol| symbol.kind == SymbolKind::CLASS && symbol.name.ends_with("Binding"))
-    })?;
 
-    if symbol.name.ends_with("Binding") {
-        if let Some(class_symbol) = file_data
-            .symbols
-            .iter()
-            .find(|entry| entry.kind == SymbolKind::CLASS && entry.name == symbol.name)
-        {
-            if let Some(layout_targets) = remap_binding_class(index, class_symbol, &module_root) {
-                return Some(layout_targets);
+    if let Some(symbol) = symbol_at_location(&file_data, location) {
+        if symbol.kind == SymbolKind::CLASS {
+            return remap_binding_class(index, symbol, &module_root);
+        }
+        if symbol.kind == SymbolKind::CONSTRUCTOR && symbol.name.ends_with("Binding") {
+            let class_symbol = file_data
+                .symbols
+                .iter()
+                .find(|entry| entry.kind == SymbolKind::CLASS && entry.name == symbol.name)?;
+            return remap_binding_class(index, class_symbol, &module_root);
+        }
+        return match symbol.kind {
+            SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE => {
+                remap_binding_field(index, symbol, &module_root, &file_data)
             }
-        }
+            SymbolKind::METHOD | SymbolKind::FUNCTION if symbol.name == "getRoot" => {
+                remap_root_view(index, &module_root, &file_data)
+            }
+            _ => None,
+        };
     }
 
-    match symbol.kind {
-        SymbolKind::CLASS => remap_binding_class(index, symbol, &module_root),
-        SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE => {
-            remap_binding_field(index, symbol, &module_root, &file_data)
-        }
-        SymbolKind::METHOD | SymbolKind::FUNCTION if symbol.name == "getRoot" => {
-            remap_root_view(index, &module_root, &file_data)
-        }
-        _ => None,
+    if location_targets_binding_field(&file_data, location) {
+        return None;
     }
+
+    let class_symbol = binding_class_symbol_for_location(&file_data, location)?;
+    remap_binding_class(index, class_symbol, &module_root)
+}
+
+fn location_targets_binding_field(file_data: &FileData, location: &Location) -> bool {
+    file_data.symbols.iter().any(|symbol| {
+        matches!(
+            symbol.kind,
+            SymbolKind::FIELD | SymbolKind::PROPERTY | SymbolKind::VARIABLE
+        ) && (position_in_range(location.range.start, symbol.selection_range)
+            || position_in_range(location.range.start, symbol.range))
+    })
+}
+
+fn binding_class_symbol_for_location<'a>(
+    file_data: &'a FileData,
+    location: &Location,
+) -> Option<&'a SymbolEntry> {
+    file_data
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.kind == SymbolKind::CLASS
+                && symbol.name.ends_with("Binding")
+                && position_in_class_header(location.range.start, symbol)
+        })
+        .or_else(|| {
+            file_data.symbols.iter().find(|symbol| {
+                symbol.kind == SymbolKind::CLASS
+                    && symbol.name.ends_with("Binding")
+                    && position_in_range(location.range.start, symbol.range)
+            })
+        })
+}
+
+fn position_in_class_header(position: Position, class_symbol: &SymbolEntry) -> bool {
+    position_in_range(position, class_symbol.selection_range)
 }
 
 fn remap_binding_class<I: IndexRead>(

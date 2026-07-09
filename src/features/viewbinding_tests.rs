@@ -1539,6 +1539,54 @@ async fn definition_on_binding_field_uses_on_demand_layout_indexing() {
 }
 
 #[test]
+fn remap_keeps_generated_java_when_field_has_no_layout_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let layout_dir = module_root.join("src/main/res/layout");
+    fs::create_dir_all(&layout_dir).expect("mkdir layout");
+    let layout_path = layout_dir.join("foo_bar.xml");
+    fs::write(&layout_path, FOO_BAR_LAYOUT).expect("write layout");
+
+    let binding_java = r#"package com.example.app.databinding;
+
+import android.widget.TextView;
+
+public final class FooBarBinding {
+    public final TextView title;
+    public final TextView orphanField;
+}
+"#;
+    let binding_java_path = module_root
+        .join("build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java");
+    fs::create_dir_all(binding_java_path.parent().unwrap()).expect("mkdir binding");
+    fs::write(&binding_java_path, binding_java).expect("write binding java");
+
+    let indexer = Indexer::new();
+    let layout_uri = Url::from_file_path(&layout_path).expect("layout uri");
+    indexer.index_layout_content(&layout_uri, FOO_BAR_LAYOUT);
+    indexer.index_generated_bindings(&module_root);
+
+    let binding_java_uri = Url::from_file_path(&binding_java_path).expect("binding uri");
+    let field_locations = indexer.find_definition_qualified("orphanField", None, &binding_java_uri);
+    assert!(
+        !field_locations.is_empty(),
+        "orphanField must resolve in generated Java"
+    );
+
+    let remapped = remap_generated_binding_definitions(&indexer, field_locations.clone());
+    assert_eq!(
+        remapped, field_locations,
+        "field with no matching @+id must not fall back to class/layout remap"
+    );
+    assert!(
+        remapped
+            .iter()
+            .all(|location| location.uri.as_str().contains("FooBarBinding.java")),
+        "expected generated Java to be kept, got: {remapped:?}"
+    );
+}
+
+#[test]
 fn remap_keeps_generated_java_when_no_layouts_exist() {
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("app");
