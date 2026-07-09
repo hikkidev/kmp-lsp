@@ -37,6 +37,14 @@ pub(crate) struct ModuleBindings {
     pub entries: HashMap<String, GeneratedBindingEntry>,
 }
 
+/// Reverse index entry: where a generated `*Binding` class lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedBindingClassLocation {
+    pub module_root: PathBuf,
+    pub file_uri: String,
+    pub package: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModuleBindingsCacheEntry {
     pub entries: HashMap<String, GeneratedBindingEntry>,
@@ -483,6 +491,7 @@ impl super::Indexer {
             for previous_entry in previous_bindings.entries.values() {
                 self.generated_binding_uris.remove(&previous_entry.file_uri);
             }
+            self.remove_generated_binding_class_entries_for_module(module_root);
         }
 
         let discovered = discover_generated_bindings(module_root);
@@ -513,6 +522,10 @@ impl super::Indexer {
                     self.index_content(&uri, &content);
                 }
             }
+        }
+
+        for entry in entries.values() {
+            self.insert_generated_binding_class_index(entry, module_root);
         }
     }
 
@@ -755,6 +768,59 @@ impl super::Indexer {
         !entries.is_empty() && entries.iter().all(|(_uri, data)| data.view_binding_ignore)
     }
 
+    /// All discovered locations for a generated binding class name.
+    pub(crate) fn generated_binding_locations_for_class(
+        &self,
+        class_name: &str,
+    ) -> Vec<GeneratedBindingClassLocation> {
+        self.generated_binding_by_class
+            .get(class_name)
+            .map(|entry| entry.clone())
+            .unwrap_or_default()
+    }
+
+    fn insert_generated_binding_class_index(
+        &self,
+        entry: &GeneratedBindingEntry,
+        module_root: &Path,
+    ) {
+        let package = self
+            .file_data_for(&entry.file_uri)
+            .and_then(|file_data| file_data.package.clone());
+        let location = GeneratedBindingClassLocation {
+            module_root: module_root.to_path_buf(),
+            file_uri: entry.file_uri.clone(),
+            package,
+        };
+        self.generated_binding_by_class
+            .entry(entry.class_name.clone())
+            .or_default()
+            .push(location);
+    }
+
+    fn remove_generated_binding_class_entries_for_module(&self, module_root: &Path) {
+        let class_names: Vec<String> = self
+            .generated_binding_by_class
+            .iter()
+            .filter_map(|entry| {
+                let references_module = entry
+                    .value()
+                    .iter()
+                    .any(|location| location.module_root == *module_root);
+                references_module.then(|| entry.key().clone())
+            })
+            .collect();
+        for class_name in class_names {
+            if let Some(mut locations) = self.generated_binding_by_class.get_mut(&class_name) {
+                locations.retain(|location| location.module_root != *module_root);
+                if locations.is_empty() {
+                    drop(locations);
+                    self.generated_binding_by_class.remove(&class_name);
+                }
+            }
+        }
+    }
+
     /// True when `uri` is a discovered generated binding file (side-index membership).
     pub(crate) fn is_generated_binding_uri(&self, uri: &str) -> bool {
         self.generated_binding_uris.contains(uri)
@@ -813,6 +879,7 @@ impl super::Indexer {
             if !entries_empty {
                 for entry in fresh_entries.values() {
                     self.generated_binding_uris.insert(entry.file_uri.clone());
+                    self.insert_generated_binding_class_index(entry, &module_root);
                 }
                 self.generated_bindings.insert(
                     module_root.clone(),

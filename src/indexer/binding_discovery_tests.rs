@@ -232,6 +232,27 @@ fn is_generated_binding_uri_distinguishes_generated_from_handwritten() {
 }
 
 #[test]
+fn generated_binding_by_class_index_supports_import_lookup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("app");
+    let binding_path = module_root
+        .join("build/generated/databinding/com/example/app/databinding/FooBarBinding.java");
+    write_binding_java(&binding_path, SAMPLE_BINDING_JAVA);
+
+    let indexer = Indexer::new();
+    indexer.index_generated_bindings(&module_root);
+
+    let locations = indexer.generated_binding_locations_for_class("FooBarBinding");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].module_root, module_root);
+    assert_eq!(
+        locations[0].package.as_deref(),
+        Some("com.example.app.databinding")
+    );
+    assert!(locations[0].file_uri.contains("FooBarBinding.java"));
+}
+
+#[test]
 fn layouts_for_binding_class_pairs_by_module_and_orders_default_first() {
     let indexer = Indexer::new();
     let module_root = PathBuf::from("app");
@@ -349,10 +370,7 @@ fn view_id_lookup_prefers_exact_match_over_ambiguous_normalized() {
         &Url::from_file_path(&default_path).expect("default uri"),
         layout,
     );
-    indexer.index_layout_content(
-        &Url::from_file_path(&land_path).expect("land uri"),
-        layout,
-    );
+    indexer.index_layout_content(&Url::from_file_path(&land_path).expect("land uri"), layout);
 
     let exact = indexer.layouts_declaring_view_id(&module_root, "conflict", "fooBar");
     assert_eq!(exact.len(), 2, "exact camelCase id matches both variants");

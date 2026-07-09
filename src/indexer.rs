@@ -76,7 +76,8 @@ pub(crate) use self::binding_discovery::{
     import_triggers_binding_discovery, is_generated_binding_watcher_path,
     layout_name_for_binding_class, module_root_for_generated_file, module_root_for_source_file,
     spawn_binding_discovery_worker, view_id_matches_lookup, BindingDiscoveryHandle,
-    DatabindingWatcherHandle, DatabindingWatcherState, ModuleBindings, ModuleBindingsCacheEntry,
+    DatabindingWatcherHandle, DatabindingWatcherState, GeneratedBindingClassLocation,
+    ModuleBindings, ModuleBindingsCacheEntry,
 };
 
 mod binding_field_type;
@@ -326,6 +327,8 @@ pub(crate) struct Indexer {
     pub(crate) generated_bindings: DashMap<PathBuf, Arc<ModuleBindings>>,
     /// O(1) membership test for generated binding file URIs.
     pub(crate) generated_binding_uris: DashSet<String>,
+    /// `class_name` → module locations for O(1) import/hover pairing.
+    pub(crate) generated_binding_by_class: DashMap<String, Vec<GeneratedBindingClassLocation>>,
     /// Secondary index: (module_root, layout_name) → layout file URIs (default variant first).
     pub(crate) layouts_by_module_and_name: DashMap<(PathBuf, String), Vec<String>>,
     /// Modules whose layout XML has been enumerated by `ensure_module_layouts_indexed`.
@@ -612,6 +615,7 @@ impl Indexer {
             layouts: DashMap::new(),
             generated_bindings: DashMap::new(),
             generated_binding_uris: DashSet::new(),
+            generated_binding_by_class: DashMap::new(),
             layouts_by_module_and_name: DashMap::new(),
             layouts_indexed_modules: DashSet::new(),
             binding_discovery: std::sync::RwLock::new(BindingDiscoveryHandle::noop()),
@@ -736,6 +740,7 @@ impl Indexer {
         self.layouts.clear();
         self.generated_bindings.clear();
         self.generated_binding_uris.clear();
+        self.generated_binding_by_class.clear();
         self.layouts_by_module_and_name.clear();
         self.layouts_indexed_modules.clear();
         if let Ok(handle) = self.binding_discovery.read() {

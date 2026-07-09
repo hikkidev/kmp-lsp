@@ -662,15 +662,9 @@ fn binding_file_uri_from_import(index: &Indexer, uri: &Url, class_name: &str) ->
             && import.full_path.ends_with(&class_suffix)
     })?;
     let (import_package, _class) = import.full_path.rsplit_once('.')?;
-    for module in index.generated_bindings.iter() {
-        let Some(entry) = module.value().entries.get(class_name) else {
-            continue;
-        };
-        let Some(binding_file_data) = index.file_data_for(&entry.file_uri) else {
-            continue;
-        };
-        if binding_file_data.package.as_deref() == Some(import_package) {
-            return Some(entry.file_uri.clone());
+    for location in index.generated_binding_locations_for_class(class_name) {
+        if location.package.as_deref() == Some(import_package) {
+            return Some(location.file_uri);
         }
     }
     None
@@ -687,17 +681,12 @@ fn binding_file_uri_in_own_module(index: &Indexer, uri: &Url, class_name: &str) 
 /// Fall back to the single workspace-wide match; `None` when the class name is
 /// ambiguous across modules (a wrong-module answer is worse than no answer).
 fn binding_file_uri_if_unambiguous(index: &Indexer, class_name: &str) -> Option<String> {
-    let mut unique_match: Option<String> = None;
-    for module in index.generated_bindings.iter() {
-        let Some(entry) = module.value().entries.get(class_name) else {
-            continue;
-        };
-        if unique_match.is_some() {
-            return None;
-        }
-        unique_match = Some(entry.file_uri.clone());
+    let locations = index.generated_binding_locations_for_class(class_name);
+    if locations.len() == 1 {
+        Some(locations[0].file_uri.clone())
+    } else {
+        None
     }
-    unique_match
 }
 
 /// When `location` is a generated binding field, return Kotlin-style hover markdown.
