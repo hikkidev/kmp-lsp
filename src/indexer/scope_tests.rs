@@ -759,6 +759,21 @@ fn utf16_position_in(source: &str, needle: &str) -> (usize, usize) {
 }
 
 #[test]
+fn variable_type_at_infers_view_binding_delegate_from_cst() {
+    let source = "package com.example\nclass MainFragment {\n    private val binding by viewBinding<FooBarBinding>()\n    fun demo() { binding }\n}";
+    let (file_uri, indexer) = live_indexed("/delegate.kt", source);
+    let (line, utf16_column) = utf16_position_in(source, "by viewBinding");
+    let position = tower_lsp::lsp_types::Position {
+        line: line as u32,
+        character: utf16_column as u32,
+    };
+    assert_eq!(
+        indexer.variable_type_at(&file_uri, "binding", position),
+        Some("FooBarBinding".into())
+    );
+}
+
+#[test]
 fn name_shadowed_by_forward_local_in_same_lambda() {
     let source = r#"fun demo(binding: FooBarBinding) {
     with(binding) {

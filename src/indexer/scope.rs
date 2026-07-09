@@ -735,6 +735,23 @@ fn property_declaration_type(
     let variable_declaration = node.first_child_of_kind(KIND_VAR_DECL)?;
     type_annotation_from_node(variable_declaration, bytes)
         .or_else(|| initializer_type_from_variable_declaration(variable_declaration, bytes))
+        .or_else(|| view_binding_delegate_type_from_property(node, bytes, var_name))
+}
+
+fn view_binding_delegate_type_from_property(
+    property_node: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    var_name: &str,
+) -> Option<String> {
+    let property_text = property_node.utf8_text_owned(bytes)?;
+    for line in property_text.lines() {
+        if let Some(binding_type) =
+            crate::resolver::infer_lines::infer_view_binding_delegate_type(line, var_name)
+        {
+            return Some(binding_type);
+        }
+    }
+    None
 }
 
 fn initializer_type_from_variable_declaration(

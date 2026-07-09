@@ -241,9 +241,8 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
     None
 }
 
-/// Infer a `*Binding` type from a `by viewBinding<…>()` or `by viewBinding(…::inflate/bind)`
-/// property delegate on a single line.
-fn infer_view_binding_delegate_type(line: &str, var_name: &str) -> Option<String> {
+/// Infer a `*Binding` type from a `by viewBinding<…>()` or `by viewBinding(…::inflate/bind)` delegate.
+pub(crate) fn infer_view_binding_delegate_type(line: &str, var_name: &str) -> Option<String> {
     let delegate_pattern = format!("{var_name} by viewBinding");
     if !line_contains_word_boundary(line, &delegate_pattern) {
         return None;
