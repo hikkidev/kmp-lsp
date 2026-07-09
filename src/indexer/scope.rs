@@ -13,10 +13,11 @@ use super::{
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
 use crate::queries::{
-    KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_ENUM_CLASS_BODY, KIND_FUN_DECL,
-    KIND_FUN_VALUE_PARAMS, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_NULLABLE_TYPE,
-    KIND_OBJECT_DECL, KIND_PARAMETER, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE,
-    KIND_USER_TYPE, KIND_VAR_DECL,
+    KIND_CALL_EXPR, KIND_CATCH_BLOCK, KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ,
+    KIND_ENUM_CLASS_BODY, KIND_FOR_STMT, KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS, KIND_INTERFACE_DECL,
+    KIND_LAMBDA_LIT, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_NULLABLE_TYPE, KIND_OBJECT_DECL,
+    KIND_PARAMETER, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE, KIND_USER_TYPE,
+    KIND_VAR_DECL, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
 };
 use crate::types::CursorPos;
 use crate::StrExt;
@@ -222,7 +223,11 @@ impl Indexer {
         // did_change) over files.lines (refreshed after debounced reindex).
         // Type resolution still uses the index (definitions, files) by name —
         // that data remains valid even before reindex completes.
-        let lines: Arc<Vec<String>> = self.mem_lines_for(uri.as_str())?;
+        let lines: Arc<Vec<String>> = self.mem_lines_for(uri.as_str()).or_else(|| {
+            self.files
+                .get(uri.as_str())
+                .map(|file_data| file_data.lines.clone())
+        })?;
 
         if name == "it" || name == "this" {
             let pos = CursorPos {
@@ -433,6 +438,14 @@ impl Indexer {
                 }
             }
 
+            let mut previous = node.prev_sibling();
+            while let Some(sibling) = previous {
+                if let Some(local_type) = property_declaration_type(sibling, var_name, bytes) {
+                    return Some(local_type);
+                }
+                previous = sibling.prev_sibling();
+            }
+
             let Some(parent) = node.parent() else {
                 break;
             };
@@ -442,14 +455,6 @@ impl Indexer {
                 KIND_CLASS_BODY | KIND_ENUM_CLASS_BODY | KIND_SOURCE_FILE
             ) {
                 return member_property_type(parent, var_name, bytes);
-            }
-
-            let mut previous = node.prev_sibling();
-            while let Some(sibling) = previous {
-                if let Some(local_type) = property_declaration_type(sibling, var_name, bytes) {
-                    return Some(local_type);
-                }
-                previous = sibling.prev_sibling();
             }
             node = parent;
         }
@@ -503,12 +508,19 @@ impl Indexer {
             {
                 return true;
             }
-            if node.kind() == KIND_FUN_DECL {
-                // Parameters bind the innermost non-lambda scope; beyond the
-                // function are members / top-level, so the search ends here.
-                return function_value_parameter_names(node, bytes)
+            if node.kind() == KIND_FUN_DECL
+                && function_value_parameter_names(node, bytes)
                     .iter()
-                    .any(|param| param == name);
+                    .any(|param| param == name)
+            {
+                return true;
+            }
+            if (node.kind() == KIND_FOR_STMT
+                || node.kind() == KIND_CATCH_BLOCK
+                || node.kind() == KIND_WHEN_EXPR)
+                && local_binding_binds_name(node, bytes, name)
+            {
+                return true;
             }
             let Some(parent) = node.parent() else {
                 return false;
@@ -522,7 +534,7 @@ impl Indexer {
             }
             let mut previous = node.prev_sibling();
             while let Some(sibling) = previous {
-                if property_declaration_binds_name(sibling, bytes, name) {
+                if local_binding_binds_name(sibling, bytes, name) {
                     return true;
                 }
                 previous = sibling.prev_sibling();
@@ -768,6 +780,164 @@ fn property_declaration_type(
     }
     let variable_declaration = node.first_child_of_kind(KIND_VAR_DECL)?;
     type_annotation_from_node(variable_declaration, bytes)
+        .or_else(|| initializer_type_from_variable_declaration(variable_declaration, bytes))
+}
+
+fn initializer_type_from_variable_declaration(
+    variable_declaration: tree_sitter::Node<'_>,
+    bytes: &[u8],
+) -> Option<String> {
+    let mut cursor = variable_declaration.walk();
+    for child in variable_declaration.children(&mut cursor) {
+        if child.kind() == "=" {
+            continue;
+        }
+        if child.kind() == KIND_SIMPLE_IDENT {
+            continue;
+        }
+        if let Some(type_name) = infer_type_from_initializer_node(child, bytes) {
+            return Some(type_name);
+        }
+    }
+    None
+}
+
+fn infer_type_from_initializer_node(node: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    if node.kind() == KIND_CALL_EXPR {
+        let callee = node.first_child_of_kind(KIND_NAV_EXPR).or_else(|| {
+            node.children(&mut node.walk())
+                .find(|child| child.kind() == KIND_SIMPLE_IDENT)
+        })?;
+        let callee_name = callee.utf8_text_owned(bytes)?;
+        if callee_name.ends_with("Binding") && callee_name.starts_with_uppercase() {
+            return Some(callee_name);
+        }
+        if let Some(inflate_type) = binding_type_from_inflate_call(node, bytes) {
+            return Some(inflate_type);
+        }
+    }
+    None
+}
+
+fn binding_type_from_inflate_call(
+    call_node: tree_sitter::Node<'_>,
+    bytes: &[u8],
+) -> Option<String> {
+    let callee_text = call_node.utf8_text_owned(bytes)?;
+    let inflate_pos = callee_text.find("Binding.inflate")?;
+    let prefix = &callee_text[..inflate_pos + "Binding".len()];
+    let binding_name = prefix
+        .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
+        .next()
+        .filter(|name| name.ends_with("Binding") && name.starts_with_uppercase())?;
+    Some(binding_name.to_string())
+}
+
+/// True when `node` introduces a local binding for `name` (val/var, for, catch, when-subject, destructuring).
+fn local_binding_binds_name(node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    match node.kind() {
+        KIND_PROP_DECL => {
+            property_declaration_binds_name(node, bytes, name)
+                || destructuring_binds_name(node, bytes, name)
+        }
+        KIND_FOR_STMT => for_loop_binds_name(node, bytes, name),
+        KIND_CATCH_BLOCK => catch_block_binds_name(node, bytes, name),
+        KIND_WHEN_EXPR => when_subject_binds_name(node, bytes, name),
+        _ => false,
+    }
+}
+
+fn destructuring_binds_name(node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    let Some(multi) = node.first_child_of_kind(KIND_MULTI_VAR_DECL) else {
+        return false;
+    };
+    let mut cursor = multi.walk();
+    for child in multi.children(&mut cursor) {
+        if child.kind() != KIND_VAR_DECL {
+            continue;
+        }
+        if child
+            .first_child_of_kind(KIND_SIMPLE_IDENT)
+            .and_then(|identifier| identifier.utf8_text_owned(bytes))
+            .as_deref()
+            == Some(name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn for_loop_binds_name(for_node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    if let Some(multi) = for_node.first_child_of_kind(KIND_MULTI_VAR_DECL) {
+        return destructuring_in_multi_binds_name(multi, bytes, name);
+    }
+    let Some(variable_declaration) = for_node.first_child_of_kind(KIND_VAR_DECL) else {
+        return false;
+    };
+    variable_declaration
+        .first_child_of_kind(KIND_SIMPLE_IDENT)
+        .and_then(|identifier| identifier.utf8_text_owned(bytes))
+        .as_deref()
+        == Some(name)
+}
+
+fn catch_block_binds_name(catch_node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    let mut cursor = catch_node.walk();
+    for child in catch_node.children(&mut cursor) {
+        if child.kind() != KIND_PARAMETER {
+            continue;
+        }
+        if child
+            .first_child_of_kind(KIND_SIMPLE_IDENT)
+            .and_then(|identifier| identifier.utf8_text_owned(bytes))
+            .as_deref()
+            == Some(name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn when_subject_binds_name(when_node: tree_sitter::Node<'_>, bytes: &[u8], name: &str) -> bool {
+    let Some(subject) = when_node.first_child_of_kind(KIND_WHEN_SUBJECT) else {
+        return false;
+    };
+    if let Some(variable_declaration) = subject.first_child_of_kind(KIND_VAR_DECL) {
+        return variable_declaration
+            .first_child_of_kind(KIND_SIMPLE_IDENT)
+            .and_then(|identifier| identifier.utf8_text_owned(bytes))
+            .as_deref()
+            == Some(name);
+    }
+    subject
+        .first_child_of_kind(KIND_SIMPLE_IDENT)
+        .and_then(|identifier| identifier.utf8_text_owned(bytes))
+        .as_deref()
+        == Some(name)
+}
+
+fn destructuring_in_multi_binds_name(
+    multi: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    name: &str,
+) -> bool {
+    let mut cursor = multi.walk();
+    for child in multi.children(&mut cursor) {
+        if child.kind() != KIND_VAR_DECL {
+            continue;
+        }
+        if child
+            .first_child_of_kind(KIND_SIMPLE_IDENT)
+            .and_then(|identifier| identifier.utf8_text_owned(bytes))
+            .as_deref()
+            == Some(name)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn member_property_type(

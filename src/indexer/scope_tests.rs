@@ -730,3 +730,56 @@ fn collect_lambda_param_names_multi() {
         "should contain 'b', got: {names:?}"
     );
 }
+
+fn live_indexed(path: &str, source: &str) -> (Url, Indexer) {
+    let file_uri = uri(path);
+    let indexer = Indexer::new();
+    indexer.index_content(&file_uri, source);
+    indexer.set_live_lines(&file_uri, source);
+    indexer.store_live_tree(&file_uri, source);
+    (file_uri, indexer)
+}
+
+fn utf16_position_in(source: &str, needle: &str) -> (usize, usize) {
+    let byte_offset = source.find(needle).expect("needle in source");
+    let mut line = 0_usize;
+    let mut utf16_column = 0_usize;
+    for (index, character) in source.char_indices() {
+        if index == byte_offset {
+            return (line, utf16_column);
+        }
+        if character == '\n' {
+            line += 1;
+            utf16_column = 0;
+        } else {
+            utf16_column += character.len_utf16();
+        }
+    }
+    panic!("needle not found");
+}
+
+#[test]
+fn name_shadowed_by_for_loop_variable() {
+    let source = r#"fun demo() {
+    for (title in listOf("a")) {
+        title
+    }
+}
+"#;
+    let (file_uri, indexer) = live_indexed("/for_shadow.kt", source);
+    let (line, utf16_column) = utf16_position_in(source, "        title\n");
+    assert!(indexer.name_shadowed_by_local_declaration(&file_uri, line, utf16_column, "title"));
+}
+
+#[test]
+fn name_shadowed_by_when_subject_variable() {
+    let source = r#"fun demo() {
+    when (val title = "inner") {
+        else -> title
+    }
+}
+"#;
+    let (file_uri, indexer) = live_indexed("/when_shadow.kt", source);
+    let (line, utf16_column) = utf16_position_in(source, "else -> title");
+    assert!(indexer.name_shadowed_by_local_declaration(&file_uri, line, utf16_column, "title"));
+}
