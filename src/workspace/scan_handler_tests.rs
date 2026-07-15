@@ -98,6 +98,52 @@ fn jar_phase_is_loading_helpers() {
     assert!(!JarPhase::Failed("oops".to_owned()).is_loading());
 }
 
+#[test]
+fn jar_indexing_terminal_messages_describe_all_terminal_phases() {
+    use crate::indexer::jar_phase::JarPhase;
+    use tower_lsp::lsp_types::MessageType;
+
+    let ready = super::jar_indexing_terminal_message(&JarPhase::Ready { count: 17 })
+        .expect("ready phase must be reported");
+    assert_eq!(ready.0, MessageType::INFO);
+    assert_eq!(ready.1, "JAR indexing complete: 17 symbols");
+
+    let unavailable = super::jar_indexing_terminal_message(&JarPhase::Unavailable)
+        .expect("unavailable phase must be reported");
+    assert_eq!(unavailable.0, MessageType::WARNING);
+    assert!(unavailable.1.contains("unavailable"));
+    assert!(unavailable.1.contains("workspace symbols are ready"));
+
+    let failed = super::jar_indexing_terminal_message(&JarPhase::Failed("sidecar exited".into()))
+        .expect("failed phase must be reported");
+    assert_eq!(failed.0, MessageType::WARNING);
+    assert!(failed.1.contains("sidecar exited"));
+    assert!(failed.1.contains("workspace symbols are ready"));
+
+    assert!(super::jar_indexing_terminal_message(&JarPhase::Pending).is_none());
+    assert!(super::jar_indexing_terminal_message(&JarPhase::InProgress).is_none());
+}
+
+#[test]
+fn jar_indexing_terminal_state_excludes_active_phases() {
+    use crate::indexer::jar_phase::JarPhase;
+
+    let indexer = Arc::new(Indexer::new());
+    let handler = make_handler(Arc::clone(&indexer));
+
+    *indexer.jar_phase.lock().unwrap() = JarPhase::Pending;
+    assert!(!handler.jar_indexing_is_terminal());
+
+    *indexer.jar_phase.lock().unwrap() = JarPhase::InProgress;
+    assert!(!handler.jar_indexing_is_terminal());
+
+    *indexer.jar_phase.lock().unwrap() = JarPhase::Ready { count: 3 };
+    assert!(handler.jar_indexing_is_terminal());
+
+    *indexer.jar_phase.lock().unwrap() = JarPhase::Failed("sidecar exited".into());
+    assert!(handler.jar_indexing_is_terminal());
+}
+
 /// Regression: a stale JAR scan that abandons on a generation change must not
 /// leave `jar_phase` stuck in a loading state (which would keep call-arg
 /// diagnostics suppressed forever via the `is_loading()` gate). It moves the

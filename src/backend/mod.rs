@@ -112,7 +112,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "kmp-lsp ready")
+            .log_message(MessageType::INFO, "kmp-lsp initialized")
             .await;
         // NOTE: dynamic capability registration via client.register_capability() is intentionally
         // omitted here. tower-lsp 0.20 panics when the oneshot receiver created by pending.wait()

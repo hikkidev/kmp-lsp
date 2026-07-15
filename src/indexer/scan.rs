@@ -62,6 +62,12 @@ pub(crate) trait ProgressReporter: Send + Sync {
     ) -> impl Future<Output = ()> + Send;
     /// Send the WorkDone End notification.
     fn end(&self, token: &NumberOrString, message: &str) -> impl Future<Output = ()> + Send;
+    /// Send a human-readable indexing status to the LSP client's server log.
+    fn log_message(
+        &self,
+        message_type: MessageType,
+        message: &str,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// No-op reporter used when no LSP client is connected (CLI `--index-only`, tests).
@@ -71,6 +77,8 @@ impl ProgressReporter for NoopReporter {
     async fn begin(&self, _: &NumberOrString, _: &str) {}
     async fn report(&self, _: &NumberOrString, _: usize, _: usize) {}
     async fn end(&self, _: &NumberOrString, _: &str) {}
+
+    async fn log_message(&self, _: MessageType, _: &str) {}
 }
 
 // ─── RAII guard ───────────────────────────────────────────────────────────────
@@ -551,7 +559,7 @@ fn build_workspace_result(
     };
 
     log::info!(
-        "Workspace indexing complete: {} parsed, {} cache hits, {} errors ({} total)",
+        "Workspace scan parsed: {} files, {} cache hits, {} errors ({} total)",
         files_parsed,
         cache_hits,
         parse_errors,
@@ -583,6 +591,15 @@ async fn send_progress_end<R: ProgressReporter>(
             ),
         )
         .await;
+}
+
+fn workspace_indexing_complete_message(result: &WorkspaceIndexResult) -> String {
+    format!(
+        "Workspace indexing complete: {} files ({} cached, {} parsed)",
+        result.files.len(),
+        result.stats.cache_hits,
+        result.stats.files_parsed
+    )
 }
 
 async fn parse_work_item(
@@ -944,6 +961,12 @@ impl Indexer {
         drop(guard);
         let token = NumberOrString::String("kmp-lsp/indexing".into());
         send_progress_end(&*reporter, &token, &result).await;
+        reporter
+            .log_message(
+                MessageType::INFO,
+                &workspace_indexing_complete_message(&result),
+            )
+            .await;
         Arc::clone(&self).index_source_paths(root).await;
     }
 

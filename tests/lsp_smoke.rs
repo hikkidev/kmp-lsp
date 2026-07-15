@@ -203,6 +203,78 @@ impl LspClient {
         }
     }
 
+    /// Wait for the human-readable workspace completion status that Zed shows
+    /// in Server Logs. It must follow the indexing progress end notification.
+    fn wait_for_workspace_indexing_status(&mut self) {
+        let deadline = Instant::now() + INDEXING_TIMEOUT;
+        let mut saw_progress_end = false;
+        let mut saw_initialized_status = false;
+        let mut saw_workspace_status = false;
+        let mut saw_jar_status = false;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let msg = self
+                .rx
+                .recv_timeout(remaining)
+                .expect("timeout waiting for workspace indexing status");
+
+            if msg.get("method").is_some() && msg.get("id").is_some() {
+                let server_id = msg["id"].clone();
+                self.write_raw(&json!({
+                    "jsonrpc": "2.0",
+                    "id": server_id,
+                    "result": null,
+                }));
+                continue;
+            }
+
+            if msg.get("method") == Some(&json!("$/progress")) {
+                let token = msg["params"]["token"].as_str().unwrap_or("");
+                let kind = msg["params"]["value"]["kind"].as_str().unwrap_or("");
+                if token == "kmp-lsp/indexing" && kind == "end" {
+                    saw_progress_end = true;
+                }
+                continue;
+            }
+
+            if msg.get("method") == Some(&json!("window/logMessage")) {
+                let message = msg["params"]["message"].as_str().unwrap_or("");
+                if message == "kmp-lsp initialized" {
+                    saw_initialized_status = true;
+                }
+                if message.starts_with("Workspace indexing complete:") {
+                    assert!(
+                        saw_progress_end,
+                        "workspace completion status must follow indexing progress end"
+                    );
+                    saw_workspace_status = true;
+                }
+                if message.starts_with("JAR indexing complete:")
+                    || message.starts_with("JAR indexing unavailable:")
+                    || message.starts_with("JAR indexing incomplete:")
+                {
+                    saw_jar_status = true;
+                }
+                if message == "kmp-lsp ready: workspace and dependency indexing settled" {
+                    assert!(
+                        saw_workspace_status,
+                        "server ready status must follow workspace indexing"
+                    );
+                    assert!(
+                        saw_jar_status,
+                        "server ready status must follow the terminal JAR status"
+                    );
+                    assert!(
+                        saw_initialized_status,
+                        "initialization status must replace the ambiguous ready status"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
     /// Full initialization handshake: send `initialize`, wait for the response,
     /// then send `initialized`.  Does not wait for indexing to finish.
     fn initialize(&mut self, root: &Path) {
@@ -331,6 +403,23 @@ fn smoke_initialize_returns_capabilities() {
         resp.get("result").is_some() || resp.get("error").is_some(),
         "server must reply to any request; got: {resp}"
     );
+}
+
+#[test]
+fn smoke_indexing_statuses_are_visible_after_cold_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    write(root, "workspace.json", r#"{"sourcePaths":[]}"#);
+    write(
+        root,
+        "src/Indexed.kt",
+        "package com.example\nclass Indexed\n",
+    );
+
+    let mut client = LspClient::spawn(root);
+    client.initialize(root);
+    client.wait_for_workspace_indexing_status();
 }
 
 /// Completions must include symbols from cross-package (library) files once

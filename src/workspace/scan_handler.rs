@@ -59,6 +59,55 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
         self.jar_indexing_in_progress.load(Ordering::Acquire)
     }
 
+    /// Returns `true` once JAR indexing has either completed or reached a
+    /// terminal unavailable/failed state.
+    pub(crate) fn jar_indexing_is_terminal(&self) -> bool {
+        use crate::indexer::jar_phase::JarPhase;
+
+        let phase = self
+            .indexer
+            .jar_phase
+            .lock()
+            .map(|phase| phase.clone())
+            .unwrap_or(JarPhase::Failed(
+                "JAR indexing state lock was poisoned".to_owned(),
+            ));
+        matches!(
+            phase,
+            JarPhase::Unavailable | JarPhase::Ready { .. } | JarPhase::Failed(_)
+        )
+    }
+
+    /// Report the terminal JAR-indexing state to LSP clients. Calls received
+    /// while a newer JAR scan is running are intentionally silent.
+    pub(crate) async fn report_jar_indexing_terminal(&self) {
+        use crate::indexer::jar_phase::JarPhase;
+
+        let phase = self
+            .indexer
+            .jar_phase
+            .lock()
+            .map(|phase| phase.clone())
+            .unwrap_or(JarPhase::Failed(
+                "JAR indexing state lock was poisoned".to_owned(),
+            ));
+
+        let Some((message_type, message)) = jar_indexing_terminal_message(&phase) else {
+            return;
+        };
+        self.reporter.log_message(message_type, &message).await;
+    }
+
+    /// Announce that all startup indexing tasks have reached terminal states.
+    pub(crate) async fn report_server_ready(&self) {
+        self.reporter
+            .log_message(
+                tower_lsp::lsp_types::MessageType::INFO,
+                "kmp-lsp ready: workspace and dependency indexing settled",
+            )
+            .await;
+    }
+
     /// Called by the actor when `scan_done_rx` fires.
     ///
     /// Marks the current scan complete and starts any pending follow-up.
@@ -310,7 +359,10 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
 
         // Cheap non-blocking check: skip if sidecar is unavailable.
         match self.indexer.jar_sidecar.try_lock() {
-            Ok(guard) if guard.is_none() => return,
+            Ok(guard) if guard.is_none() => {
+                let _ = self.jar_done_tx.send(());
+                return;
+            }
             Err(_) => {
                 // Lock held by running scan — already in progress, coalesce.
                 return;
@@ -460,6 +512,29 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
             // Wake the actor to recompute diagnostics now that JAR symbols exist.
             let _ = jar_done_tx.send(());
         });
+    }
+}
+
+fn jar_indexing_terminal_message(
+    phase: &crate::indexer::jar_phase::JarPhase,
+) -> Option<(tower_lsp::lsp_types::MessageType, String)> {
+    use crate::indexer::jar_phase::JarPhase;
+    use tower_lsp::lsp_types::MessageType;
+
+    match phase {
+        JarPhase::Ready { count } => Some((
+            MessageType::INFO,
+            format!("JAR indexing complete: {count} symbols"),
+        )),
+        JarPhase::Unavailable => Some((
+            MessageType::WARNING,
+            "JAR indexing unavailable: kmp-jar-indexer sidecar was not found; workspace symbols are ready".to_owned(),
+        )),
+        JarPhase::Failed(reason) => Some((
+            MessageType::WARNING,
+            format!("JAR indexing incomplete: {reason}; workspace symbols are ready"),
+        )),
+        JarPhase::Pending | JarPhase::InProgress => None,
     }
 }
 

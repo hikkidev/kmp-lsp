@@ -65,4 +65,8 @@ impl ProgressReporter for LspProgressReporter {
             })
             .await;
     }
+
+    async fn log_message(&self, message_type: MessageType, message: &str) {
+        self.0.log_message(message_type, message.to_owned()).await;
+    }
 }

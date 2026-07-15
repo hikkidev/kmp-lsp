@@ -192,7 +192,7 @@ impl DocumentHandler {
                     let mut d = Vec::new();
                     // Skip semantic diagnostics while the workspace scan is still in
                     // progress — the index is partial and would produce false positives
-                    // (e.g. sealed subtypes not yet indexed).  `on_became_ready` in the
+                    // (e.g. sealed subtypes not yet indexed).  `on_workspace_became_ready` in the
                     // actor will call `republish_open_file_diagnostics` once the scan
                     // completes to fill in the diagnostics for all open files.
                     if !indexing_in_progress {
@@ -227,7 +227,7 @@ impl DocumentHandler {
 
     /// Re-publish diagnostics for every currently-open file.
     ///
-    /// Called by the actor's `on_became_ready` after the workspace scan
+    /// Called by the actor's `on_workspace_became_ready` after the workspace scan
     /// completes so that files opened during the scan get their semantic
     /// diagnostics (which were suppressed while the index was partial).
     pub(crate) fn republish_open_file_diagnostics(&self) {

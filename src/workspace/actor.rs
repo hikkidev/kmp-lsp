@@ -91,11 +91,11 @@ impl<R: ProgressReporter + 'static> Actor<R> {
     /// The exhaustive `match` is the architectural guarantee: every new
     /// [`Event`] variant must be handled here or the code will not compile.
     ///
-    /// After each event or scan completion, checks whether the workspace has
-    /// transitioned into the quiescent "ready" state and fires [`on_became_ready`]
-    /// exactly once per such transition.
+    /// After each event or scan completion, reports workspace readiness and then
+    /// reports server readiness once JAR indexing has also reached a terminal state.
     pub(crate) async fn run(mut self) {
-        let mut was_ready = false;
+        let mut was_workspace_ready = false;
+        let mut was_server_ready = false;
         loop {
             // No `biased;` — both arms compete fairly so that a flood of
             // FileChanged events cannot starve scan completions indefinitely.
@@ -111,19 +111,27 @@ impl<R: ProgressReporter + 'static> Actor<R> {
                     // JAR indexing finished — recompute diagnostics for open files
                     // that were diagnosed against a JAR-less (partial) index.
                     self.document_handler.republish_open_file_diagnostics();
+                    self.scan_handler.report_jar_indexing_terminal().await;
                 }
             }
-            let is_ready = self.is_ready().await;
-            if !was_ready && is_ready {
-                self.on_became_ready().await;
+            let workspace_is_ready = self.is_workspace_ready().await;
+            if !was_workspace_ready && workspace_is_ready {
+                self.on_workspace_became_ready().await;
             }
-            was_ready = is_ready;
+            was_workspace_ready = workspace_is_ready;
+
+            let server_is_ready =
+                workspace_is_ready && self.scan_handler.jar_indexing_is_terminal();
+            if !was_server_ready && server_is_ready {
+                self.scan_handler.report_server_ready().await;
+            }
+            was_server_ready = server_is_ready;
         }
     }
 
     /// Returns `true` when the workspace has been initialised **and** no
     /// background scan is currently in flight.
-    async fn is_ready(&self) -> bool {
+    async fn is_workspace_ready(&self) -> bool {
         self.scan_handler
             .state_stream()
             .read()
@@ -135,7 +143,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
 
     /// Called exactly once each time the workspace transitions from a
     /// non-quiescent state into the quiescent ready state.
-    async fn on_became_ready(&self) {
+    async fn on_workspace_became_ready(&self) {
         if let Some(state) = self.scan_handler.state_stream().read().await.ready() {
             log::info!(
                 "Workspace ready: {} ({} source path(s))",
