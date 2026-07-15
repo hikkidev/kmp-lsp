@@ -632,8 +632,6 @@ pub(crate) fn find_field_type_in_class_from(
 
 // ─── Inherited property type inference ───────────────────────────────────────
 
-const INHERITED_PROPERTY_MAX_DEPTH: usize = 12;
-
 /// Look up an inherited property type on `class_name`, walking supertypes and
 /// applying generic argument substitution at each level.
 pub(crate) fn find_inherited_property_type(
@@ -643,16 +641,33 @@ pub(crate) fn find_inherited_property_type(
     property_name: &str,
 ) -> Option<String> {
     let class_base = class_name.split('<').next().unwrap_or(class_name);
-    let mut visited = std::collections::HashSet::new();
-    find_inherited_property_type_recursive(
+    let class_url = Url::parse(class_uri).ok()?;
+    let file_data = ensure_file_data(indexer, &class_url)?;
+    let class_symbol = file_data
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == class_base)?;
+
+    crate::indexer::resolution::walk_class_hierarchy(
         indexer,
-        class_base,
         class_uri,
-        property_name,
-        &std::collections::HashMap::new(),
-        &mut visited,
-        0,
+        class_base,
+        class_symbol.selection_start(),
     )
+    .into_iter()
+    .filter(|hierarchy_class| {
+        hierarchy_class.uri.as_str() != class_uri
+            || hierarchy_class.selection_line != class_symbol.selection_start()
+    })
+    .find_map(|hierarchy_class| {
+        let raw = infer_field_type_raw(indexer, hierarchy_class.uri.as_str(), property_name)?;
+        let substituted = crate::indexer::apply_type_subst(&raw, &hierarchy_class.substitution);
+        if is_unresolved_generic_type(&substituted) {
+            None
+        } else {
+            Some(substituted)
+        }
+    })
 }
 
 /// Fallback for bare member access (`binding.title`) inside a subclass: scan every
@@ -689,99 +704,6 @@ fn find_inherited_property_type_from_file(
         });
     }
     None
-}
-
-fn find_inherited_property_type_recursive(
-    indexer: &Indexer,
-    class_name: &str,
-    class_uri: &str,
-    property_name: &str,
-    parent_subst: &std::collections::HashMap<String, String>,
-    visited: &mut std::collections::HashSet<(String, String)>,
-    depth: usize,
-) -> Option<String> {
-    if depth >= INHERITED_PROPERTY_MAX_DEPTH {
-        return None;
-    }
-    if !visited.insert((class_uri.to_owned(), class_name.to_owned())) {
-        return None;
-    }
-
-    let class_url = Url::parse(class_uri).ok()?;
-    let file_data = ensure_file_data(indexer, &class_url)?;
-    let class_line = file_data
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == class_name)
-        .map(|symbol| symbol.selection_start());
-
-    let super_entries: Vec<(String, Vec<String>)> = file_data
-        .supers
-        .iter()
-        .filter(|(line, _, _)| class_line.is_none_or(|class_line| *line == class_line))
-        .map(|(_, super_name, type_args)| {
-            let substituted_args: Vec<String> = type_args
-                .iter()
-                .map(|type_arg| apply_subst_to_type_arg(type_arg, parent_subst))
-                .collect();
-            (super_name.clone(), substituted_args)
-        })
-        .collect();
-
-    for (super_name, type_args) in super_entries {
-        let super_base = super_name.split('<').next().unwrap_or(&super_name);
-        for location in indexer.resolve_symbol_no_rg(super_base, &class_url) {
-            if let Some(raw) = infer_field_type_raw(indexer, location.uri.as_str(), property_name) {
-                let super_type_params = find_class_type_params(indexer, super_base);
-                let substituted =
-                    apply_inherited_property_subst(&raw, &super_type_params, &type_args);
-                if !is_unresolved_generic_type(&substituted) {
-                    return Some(substituted);
-                }
-            }
-
-            let super_type_params = find_class_type_params(indexer, super_base);
-            let mut level_subst = parent_subst.clone();
-            for (param, arg) in super_type_params.iter().zip(type_args.iter()) {
-                level_subst.insert(param.clone(), arg.clone());
-            }
-
-            if let Some(found) = find_inherited_property_type_recursive(
-                indexer,
-                super_base,
-                location.uri.as_str(),
-                property_name,
-                &level_subst,
-                visited,
-                depth + 1,
-            ) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-fn apply_inherited_property_subst(
-    raw: &str,
-    super_type_params: &[String],
-    type_args: &[String],
-) -> String {
-    if type_args.is_empty() || super_type_params.is_empty() {
-        raw.to_owned()
-    } else {
-        apply_supertype_subst(raw, super_type_params, type_args)
-    }
-}
-
-fn apply_subst_to_type_arg(
-    type_arg: &str,
-    parent_subst: &std::collections::HashMap<String, String>,
-) -> String {
-    if parent_subst.is_empty() {
-        return type_arg.to_owned();
-    }
-    crate::indexer::apply_type_subst(type_arg, parent_subst)
 }
 
 fn is_unresolved_generic_type(type_name: &str) -> bool {

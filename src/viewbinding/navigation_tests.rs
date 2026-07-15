@@ -2245,33 +2245,59 @@ impl InheritedGenericBindingFixture {
         fs::write(&default_layout_path, FOO_BAR_LAYOUT).expect("write default layout");
 
         let binding_java_path = module_root.join(
-            "build/generated/source/databinding/com/example/app/databinding/FooBarBinding.java",
+            "build/generated/data_binding_base_class_source_out/debug/out/com/example/app/databinding/FooBarBinding.java",
         );
         fs::create_dir_all(binding_java_path.parent().unwrap()).expect("mkdir binding");
         fs::write(&binding_java_path, FOO_BAR_BINDING_JAVA).expect("write binding java");
 
-        let base_path = module_root.join("src/main/kotlin/com/example/ViewBindingAdapter.kt");
+        let base_path = module_root.join("src/main/kotlin/framework/ViewBindingAdapter.kt");
         fs::create_dir_all(base_path.parent().unwrap()).expect("mkdir base");
-        let base_source = r#"package com.example
+        let base_source = r#"package framework
 
-abstract class ViewBindingAdapter<T> {
-    val binding: T get() = error("not init")
+import androidx.viewbinding.ViewBinding
+
+abstract class ViewBindingAdapter<V : ViewBinding> {
+    private var _viewBinding: V? = null
+    val viewBinding: V get() = _viewBinding ?: error("not init")
 }
 "#;
         fs::write(&base_path, base_source).expect("write base adapter");
 
-        let kotlin_path = module_root.join("src/main/kotlin/com/example/FooFragment.kt");
-        let kotlin_source = r#"package com.example
+        let intermediate_path = module_root.join("src/main/kotlin/shared/BaseIntermediate.kt");
+        fs::create_dir_all(intermediate_path.parent().unwrap()).expect("mkdir intermediate");
+        let intermediate_source = r#"package shared
+
+import androidx.viewbinding.ViewBinding
+import framework.ViewBindingAdapter
+
+abstract class BaseIntermediate<V : ViewBinding> : ViewBindingAdapter<V>()
+"#;
+        fs::write(&intermediate_path, intermediate_source).expect("write intermediate");
+
+        let decoy_path = module_root.join("src/main/kotlin/misleading/ViewBindingAdapter.kt");
+        fs::create_dir_all(decoy_path.parent().unwrap()).expect("mkdir decoy");
+        let decoy_source = r#"package misleading
+
+abstract class ViewBindingAdapter<V> {
+    val viewBinding: WrongBinding get() = error("wrong")
+}
+"#;
+        fs::write(&decoy_path, decoy_source).expect("write decoy");
+
+        let kotlin_path = module_root.join("src/main/kotlin/feature/FooFragment.kt");
+        fs::create_dir_all(kotlin_path.parent().unwrap()).expect("mkdir fragment");
+        let kotlin_source = r#"package feature
 
 import com.example.app.databinding.FooBarBinding
+import shared.BaseIntermediate
 
-class FooFragment : ViewBindingAdapter<FooBarBinding>() {
+class FooFragment : BaseIntermediate<FooBarBinding>() {
     fun bar() {
-        binding.title.toString()
-        with(binding) {
+        viewBinding.title.toString()
+        with(viewBinding) {
             title.toString()
         }
-        binding.apply {
+        viewBinding.apply {
             title.toString()
         }
     }
@@ -2284,11 +2310,15 @@ class FooFragment : ViewBindingAdapter<FooBarBinding>() {
 
         let default_layout_uri = Url::from_file_path(&default_layout_path).expect("default uri");
         let base_uri = Url::from_file_path(&base_path).expect("base uri");
+        let intermediate_uri = Url::from_file_path(&intermediate_path).expect("intermediate uri");
+        let decoy_uri = Url::from_file_path(&decoy_path).expect("decoy uri");
         let kotlin_uri = Url::from_file_path(&kotlin_path).expect("fragment uri");
 
         indexer.index_layout_content(&default_layout_uri, FOO_BAR_LAYOUT);
         indexer.index_generated_bindings(&module_root, None);
+        indexer.index_content(&decoy_uri, decoy_source);
         indexer.index_content(&base_uri, base_source);
+        indexer.index_content(&intermediate_uri, intermediate_source);
         indexer.index_content(&kotlin_uri, kotlin_source);
         indexer.set_live_lines(&kotlin_uri, kotlin_source);
         indexer.store_live_tree(&kotlin_uri, kotlin_source);
@@ -2333,14 +2363,18 @@ class FooFragment : ViewBindingAdapter<FooBarBinding>() {
 #[test]
 fn resolve_expected_binding_class_inherited_generic_base() {
     let fixture = InheritedGenericBindingFixture::build();
-    fixture.assert_resolves_to_foo_bar("binding.title.toString()", "title", Some("binding"));
     fixture.assert_resolves_to_foo_bar(
-        "with(binding) {\n            title.toString()",
+        "viewBinding.title.toString()",
+        "title",
+        Some("viewBinding"),
+    );
+    fixture.assert_resolves_to_foo_bar(
+        "with(viewBinding) {\n            title.toString()",
         "title",
         None,
     );
     fixture.assert_resolves_to_foo_bar(
-        "binding.apply {\n            title.toString()",
+        "viewBinding.apply {\n            title.toString()",
         "title",
         None,
     );

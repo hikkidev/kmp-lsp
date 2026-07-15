@@ -51,7 +51,7 @@ impl LspClient {
         let canonical = canonical_root(workspace_root);
         let mut child = Command::new(BIN)
             .args(["--stdio"])
-            .env("KOTLIN_LSP_WORKSPACE_ROOT", &canonical)
+            .env("KMP_LSP_WORKSPACE_ROOT", &canonical)
             .current_dir(&canonical)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -959,20 +959,28 @@ class MainActivity {
     let uri = file_uri(root, "app/src/main/kotlin/com/example/MainActivity.kt");
     client.open_file(&uri, "kotlin", usage_text);
 
-    let type_resp = client.request(
-        "textDocument/definition",
-        json!({
-            "textDocument": {"uri": uri},
-            "position": pos(usage_text, 5, 22),
-        }),
-    );
-    let type_result = &type_resp["result"];
-    let type_target_uri = if type_result.is_array() {
-        type_result[0]["uri"].as_str().unwrap_or("").to_owned()
-    } else {
-        type_result["uri"].as_str().unwrap_or("").to_owned()
-    };
     let expected_layout_uri = file_uri(root, "app/src/main/res/layout/foo_bar.xml");
+    let mut type_result = Value::Null;
+    let mut type_target_uri = String::new();
+    for _ in 0..20 {
+        let type_response = client.request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": pos(usage_text, 5, 22),
+            }),
+        );
+        type_result = type_response["result"].clone();
+        type_target_uri = if type_result.is_array() {
+            type_result[0]["uri"].as_str().unwrap_or("").to_owned()
+        } else {
+            type_result["uri"].as_str().unwrap_or("").to_owned()
+        };
+        if type_target_uri == expected_layout_uri {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
     assert!(
         type_target_uri == expected_layout_uri,
         "binding type definition must on-demand remap to layout XML;\n  expected: {expected_layout_uri}\n  got:      {type_target_uri}\n  full:     {type_result}"
